@@ -1,3 +1,4 @@
+// ==UserScript==
 // @name         Farla 02 - TradePeg Product Sales Drilldown SO/PO Tabs
 // @namespace    farla-tradepeg
 // @version      1.7.2
