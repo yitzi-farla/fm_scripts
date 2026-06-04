@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 03 - Batch Report Download with Locations
 // @namespace    farla-office-scripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Adds a "Download with Locations" export button to the TradePeg Batch Report.
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
@@ -80,9 +80,9 @@
 
         let batchLocationRows = [];
         try {
-          batchLocationRows = await getBatchLocationRows(productId);
+          batchLocationRows = await getTooltipBatchRows(productId);
         } catch (err) {
-          console.warn('[Farla 03] Could not load batch details for product:', productId, err);
+          console.warn('[Farla 03] Could not load tooltip batches for product:', productId, err);
         }
 
         for (const expiringRow of expiringRowsForProduct) {
@@ -138,8 +138,12 @@
     return response.json();
   }
 
-  async function getBatchLocationRows(productId) {
-    const url = '/wapp/en-gb/inventory/products/batch-details/' + encodeURIComponent(productId);
+  async function getTooltipBatchRows(productId) {
+    const url =
+      '/wapp/en-gb/inventory/products/tooltip/' +
+      encodeURIComponent(productId) +
+      '/batches?r=' +
+      encodeURIComponent(productId);
 
     const response = await fetch(url, {
       credentials: 'include',
@@ -149,58 +153,37 @@
     });
 
     if (!response.ok) {
-      throw new Error('Could not load batch details. HTTP ' + response.status);
+      throw new Error('Could not load product tooltip batches. HTTP ' + response.status);
     }
 
     const html = await response.text();
-    return parseHtmlTables(html);
+    return parseTooltipBatchHtml(html);
   }
 
-  function parseHtmlTables(html) {
+  function parseTooltipBatchHtml(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const tables = Array.from(doc.querySelectorAll('table'));
     const rows = [];
 
-    for (const table of tables) {
-      const headers = getTableHeaders(table);
-      if (!headers.length) continue;
+    doc.querySelectorAll('table tbody tr').forEach(function (tr) {
+      const cells = Array.from(tr.querySelectorAll('td'));
+      if (cells.length < 4) return;
 
-      const bodyRows = Array.from(table.querySelectorAll('tbody tr'));
-      const sourceRows = bodyRows.length ? bodyRows : Array.from(table.querySelectorAll('tr')).slice(1);
+      const batchLink = cells[3].querySelector('a[data-url*="/inventory/products/batch/"]');
+      const batchUrl = batchLink ? batchLink.getAttribute('data-url') || '' : '';
+      const batchIdMatch = batchUrl.match(/\/batch\/[^/]+\/([^/?#]+)/i);
 
-      for (const tr of sourceRows) {
-        const cells = Array.from(tr.querySelectorAll('td'));
-        if (!cells.length) continue;
-
-        const row = {};
-        headers.forEach(function (header, index) {
-          row[header] = cleanText(cells[index] ? cells[index].innerText || cells[index].textContent : '');
-        });
-
-        if (Object.values(row).some(function (value) { return value !== ''; })) {
-          rows.push(row);
-        }
-      }
-    }
-
-    return rows;
-  }
-
-  function getTableHeaders(table) {
-    let headers = Array.from(table.querySelectorAll('thead th')).map(function (th) {
-      return cleanText(th.innerText || th.textContent);
+      rows.push({
+        Warehouse: cleanText(cells[0].textContent),
+        OnHand: cleanQty(cells[1].textContent),
+        Bin: cleanText(cells[2].textContent),
+        BatchNumber: cleanText(batchLink ? batchLink.textContent : cells[3].textContent),
+        BatchID: batchIdMatch ? batchIdMatch[1] : '',
+        BestBeforeDate: cleanText(cells[4] ? cells[4].textContent : ''),
+        Reserved: cleanText(cells[5] ? cells[5].textContent : '')
+      });
     });
 
-    if (!headers.length) {
-      const firstRow = table.querySelector('tr');
-      if (firstRow) {
-        headers = Array.from(firstRow.querySelectorAll('th,td')).map(function (cell) {
-          return cleanText(cell.innerText || cell.textContent);
-        });
-      }
-    }
-
-    return headers.filter(Boolean);
+    return rows;
   }
 
   function findMatchingLocationRows(expiringRow, locationRows) {
@@ -208,16 +191,11 @@
     const wantedBatchId = cleanCompare(expiringRow.BatchID);
 
     return locationRows.filter(function (row) {
-      const rowBatch =
-        getAny(row, ['Batch', 'Batch Number', 'Batch No', 'BatchNumber', 'Lot', 'Lot Number', 'LOT']) ||
-        '';
+      const rowBatch = cleanCompare(row.BatchNumber);
+      const rowBatchId = cleanCompare(row.BatchID);
 
-      const rowBatchId =
-        getAny(row, ['Batch ID', 'BatchID', 'ID']) ||
-        '';
-
-      if (wantedBatchId && cleanCompare(rowBatchId) === wantedBatchId) return true;
-      if (wantedBatch && cleanCompare(rowBatch) === wantedBatch) return true;
+      if (wantedBatchId && rowBatchId === wantedBatchId) return true;
+      if (wantedBatch && rowBatch === wantedBatch) return true;
 
       return false;
     });
@@ -232,14 +210,17 @@
       'Batch': expiringRow.BatchNumber || '',
       'Expiry Date': formatDate(expiringRow.ExpiryDate),
       'Expiry Source': expiringRow.ExiprySource || '',
-      'Warehouse': getAny(locationRow, ['Warehouse', 'Warehouse Name', 'Wh', 'WH']) || '',
-      'Bin / Location': getAny(locationRow, ['Bin', 'BIN', 'Location', 'Bin Location', 'BINLocation']) || '',
-      'Location On Hand': getAny(locationRow, ['On Hand', 'OnHand', 'Qty', 'Quantity', 'Stock']) || '',
-      'Location Sellable': getAny(locationRow, ['Sellable', 'Available', 'Free Stock']) || '',
+      'Warehouse': locationRow.Warehouse || '',
+      'Bin / Location': locationRow.Bin || '',
+      'Location On Hand': locationRow.OnHand || '',
+      'Location Sellable': locationRow.OnHand || '',
+      'Best Before Date': locationRow.BestBeforeDate || '',
+      'Reserved': locationRow.Reserved || '',
       'Report On Hand': cleanNumber(expiringRow.OnHand),
       'Report Sellable': cleanNumber(expiringRow.Sellable),
       'ProductID': expiringRow.ProductID || '',
       'BatchID': expiringRow.BatchID || '',
+      'Location BatchID': locationRow.BatchID || '',
       'Note': note || ''
     };
   }
@@ -253,33 +234,18 @@
     }, {});
   }
 
-  function getAny(row, keys) {
-    for (const key of keys) {
-      if (Object.prototype.hasOwnProperty.call(row, key) && cleanText(row[key]) !== '') {
-        return cleanText(row[key]);
-      }
-    }
-
-    const normalizedWanted = keys.map(normalizeHeader);
-    for (const actualKey of Object.keys(row)) {
-      if (normalizedWanted.includes(normalizeHeader(actualKey)) && cleanText(row[actualKey]) !== '') {
-        return cleanText(row[actualKey]);
-      }
-    }
-
-    return '';
-  }
-
-  function normalizeHeader(value) {
-    return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  }
-
   function cleanText(value) {
     return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   }
 
   function cleanCompare(value) {
     return cleanText(value).toLowerCase();
+  }
+
+  function cleanQty(value) {
+    const text = cleanText(value);
+    const match = text.match(/-?\d+(?:\.\d+)?/);
+    return match ? match[0] : text;
   }
 
   function cleanNumber(value) {
@@ -389,6 +355,6 @@
 
   window[SCRIPT_ID] = {
     init: init,
-    version: '1.0.0'
+    version: '1.0.1'
   };
 })();
