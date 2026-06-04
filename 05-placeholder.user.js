@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         Farla - Placeholder Script 03
+// @name         Farla - Placeholder Script 05
 // @namespace    farla-office-scripts
-// @version      0.1.0
-// @description  Reserved for a future Farla office userscript
+// @version      0.1.1
+// @description  Reserved for a future Farla office Tampermonkey script
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/CHANGE-ME-ORG/CHANGE-ME-REPO/main/userscripts/03-placeholder.user.js
-// @downloadURL  https://raw.githubusercontent.com/CHANGE-ME-ORG/CHANGE-ME-REPO/main/userscripts/03-placeholder.user.js
+// @updateURL    https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/05-placeholder.user.js
+// @downloadURL  https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/05-placeholder.user.js
 // ==/UserScript==
 
 (function () {
