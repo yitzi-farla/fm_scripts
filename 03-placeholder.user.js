@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla - Placeholder Script 03
 // @namespace    farla-office-scripts
-// @version      0.1.1
+// @version      0.1.2
 // @description  Reserved for a future Farla office Tampermonkey script
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
@@ -13,5 +13,5 @@
   'use strict';
 
   // Placeholder.
-  // Add future script logic here.
+  // Add future script logic here, then increase @version above before committing.
 })();
