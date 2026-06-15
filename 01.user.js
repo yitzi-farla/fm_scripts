@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 01 - TradePeg SO/PO UOM Drilldown
 // @namespace    farla-tradepeg
-// @version      0.4.1
+// @version      0.4.2
 // @description  Add cached UOM drilldown with Shelf Qty, EAN, SKU and ASIN to SO/PO line items
 // @match        https://farla2.tradepeg.net/app/en-gb/doc/so/*
 // @match        https://farla2.tradepeg.net/wapp/en-gb/doc/so/*
