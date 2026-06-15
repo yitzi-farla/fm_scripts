@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  const MAX_UOM_ID_TO_PROBE = 2;   // Checks /uom/0 through /uom/8. Reduce to 2 if only Unit/Pack/Case exist.
+  const MAX_UOM_ID_TO_PROBE = 8;   // Checks /uom/0 through /uom/8. Reduce to 2 if only Unit/Pack/Case exist.
   const REQUEST_DELAY_MS = 0;      // Set to 50-100 if you want to be gentler on the server.
   const productCache = new Map();
   const CACHE_VERSION = 'v2-uom-sort-unit-pack-case';
