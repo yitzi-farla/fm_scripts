@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Farla 01 - TradePeg SO/PO UOM Drilldown
 // @namespace    farla-tradepeg
-// @version      0.4.2
-// @description  Add cached UOM drilldown with Shelf Qty, EAN, SKU and ASIN to SO/PO line items
+// @version      0.4.4
+// @description  Add cached UOM drilldown with Shelf Qty, EAN, SKU and Volume to SO/PO line items
 // @match        https://farla2.tradepeg.net/app/en-gb/doc/so/*
 // @match        https://farla2.tradepeg.net/wapp/en-gb/doc/so/*
 // @match        https://farla2.tradepeg.net/app/en-gb/doc/po/*
@@ -15,10 +15,10 @@
 (function () {
   'use strict';
 
-  const MAX_UOM_ID_TO_PROBE = 8;   // Checks /uom/0 through /uom/8. Reduce to 2 if only Unit/Pack/Case exist.
-  const REQUEST_DELAY_MS = 0;      // Set to 50-100 if you want to be gentler on the server.
+  const MAX_UOM_ID_TO_PROBE = 8;
+  const REQUEST_DELAY_MS = 0;
   const productCache = new Map();
-  const CACHE_VERSION = 'v2-uom-sort-unit-pack-case';
+  const CACHE_VERSION = 'v4-uom-volume-unit-pack-case';
 
   injectStyles();
 
@@ -32,8 +32,8 @@
 
   function getRows() {
     return Array.from(document.querySelectorAll([
-      'tr[id][class*="tr_sodetail_"]',      // SO rows
-      '#details tbody tr[id^="tr_detail_"]' // PO rows
+      'tr[id][class*="tr_sodetail_"]',
+      '#details tbody tr[id^="tr_detail_"]'
     ].join(',')));
   }
 
@@ -71,6 +71,7 @@
 
   function uomSortOrder(uomName) {
     const normalized = String(uomName || '').trim().toLowerCase();
+
     const order = {
       unit: 0,
       pack: 1,
@@ -94,22 +95,20 @@
     const productId = inputValue(doc, 'input[name="productId"]');
     const returnedUomId = inputValue(doc, 'input[name="uomId"]');
 
-    // UOM name is shown as a span.form-control, e.g. Unit / Pack / Case.
     const uomName = textValue(doc, '.formRow .grid4 .form-control');
 
     const uomRef = inputValue(doc, 'input[name="uom_ref"]');
     const ean = inputValue(doc, 'input[name="ean"]');
     const shelfQty = inputValue(doc, 'input[name="qty"]');
-    const asin = inputValue(doc, 'input[name="asin"]');
+    const volume = inputValue(doc, 'input[name="volume"]');
 
-    // If the endpoint did not return a useful UOM form, ignore it.
     if (!productId || !uomName) return null;
 
     return {
       uomId: returnedUomId || String(requestedUomId),
       uomName,
       shelfQty,
-      asin,
+      volume,
       uomRef,
       ean
     };
@@ -121,7 +120,9 @@
     try {
       const res = await fetch(url, {
         credentials: 'same-origin',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        }
       });
 
       if (!res.ok) return null;
@@ -140,6 +141,7 @@
     }
 
     const stored = sessionStorage.getItem(cacheKey(productId));
+
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
@@ -203,7 +205,7 @@
         <tr>
           <th>UOM</th>
           <th>Shelf Qty</th>
-          <th>ASIN</th>
+          <th>Volume</th>
           <th>SKU / Ref</th>
           <th>EAN</th>
         </tr>
@@ -217,7 +219,7 @@
       const tr = document.createElement('tr');
 
       const isBlankRow = !String(uom.shelfQty || '').trim()
-        && !String(uom.asin || '').trim()
+        && !String(uom.volume || '').trim()
         && !String(uom.uomRef || '').trim()
         && !String(uom.ean || '').trim();
 
@@ -228,7 +230,7 @@
       tr.innerHTML = `
         ${tableCell(uom.uomName)}
         ${tableCell(uom.shelfQty)}
-        ${tableCell(uom.asin)}
+        ${tableCell(uom.volume)}
         ${tableCell(uom.uomRef)}
         ${tableCell(uom.ean)}
       `;
@@ -256,6 +258,7 @@
 
   function removeOpenPopovers() {
     document.querySelectorAll('.tp-uom-popover').forEach(el => el.remove());
+
     document.querySelectorAll('.tp-uom-badge.tp-open').forEach(el => {
       el.classList.remove('tp-open');
       if (el.dataset.loadedText) el.textContent = el.dataset.loadedText;
@@ -265,7 +268,6 @@
   function positionPopover(popover, anchor) {
     const margin = 8;
 
-    // Start hidden so the browser can measure the popover correctly.
     popover.style.visibility = 'hidden';
     popover.style.position = 'fixed';
     popover.style.top = '0px';
@@ -281,12 +283,10 @@
     let top;
 
     if (spaceBelow >= popRect.height + margin || spaceBelow >= spaceAbove) {
-      // Open below.
       top = anchorRect.bottom + margin;
       popover.classList.remove('tp-uom-popover-above');
       popover.classList.add('tp-uom-popover-below');
     } else {
-      // Open above.
       top = anchorRect.top - popRect.height - margin;
       popover.classList.remove('tp-uom-popover-below');
       popover.classList.add('tp-uom-popover-above');
@@ -294,22 +294,18 @@
 
     let left = anchorRect.left;
 
-    // Prevent right overflow.
     if (left + popRect.width > window.innerWidth - margin) {
       left = window.innerWidth - popRect.width - margin;
     }
 
-    // Prevent left overflow.
     if (left < margin) {
       left = margin;
     }
 
-    // Prevent top overflow.
     if (top < margin) {
       top = margin;
     }
 
-    // Prevent bottom overflow if the popover is very tall.
     if (top + popRect.height > window.innerHeight - margin) {
       top = Math.max(margin, window.innerHeight - popRect.height - margin);
     }
@@ -320,7 +316,6 @@
   }
 
   function clearNativeHoverTitle(uomCell) {
-    // Remove any tooltip/hover styling left by older versions of this script or by re-rendered rows.
     uomCell.removeAttribute('title');
     uomCell.style.textDecoration = '';
     uomCell.style.cursor = '';
@@ -351,6 +346,7 @@
       event.stopPropagation();
 
       const alreadyOpen = badge.classList.contains('tp-open');
+
       removeOpenPopovers();
 
       if (alreadyOpen) return;
@@ -369,8 +365,7 @@
       positionPopover(popover, badge);
     });
 
-    // Preload immediately on page load.
-    fetchAllUomsForProduct(productId).then(uoms => {
+    fetchAllUomsForProduct(productId).then(() => {
       badge.removeAttribute('title');
       badge.classList.add('tp-loaded');
     });
@@ -390,7 +385,6 @@
       attachBadge(row, productId, productLabel);
     }
 
-    // Start all unique product loads at once.
     await Promise.all(
       Array.from(products.keys()).map(productId => fetchAllUomsForProduct(productId))
     );
