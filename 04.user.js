@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 04 - TradePeg Repricer Tab
 // @namespace    farla-office-scripts
-// @version      3.1.0
+// @version      3.2.0
 // @description  Adds a "Repricer" tab to TradePeg product pages showing each UOM's competitor SKUs and prices from Farla Tools, editable in place.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -401,7 +401,9 @@
     const reference = state.reference
     const page = await call(
       'GET',
-      `${PRICING_BASE}/mappings?q=${encodeURIComponent(reference)}&filter=all&page=1&limit=200`
+      // The whole catalogue, not just SELECT: this is one product somebody is
+      // looking at, and it is worth mapping whether or not it is published.
+      `${PRICING_BASE}/mappings?q=${encodeURIComponent(reference)}&filter=all&range=all&page=1&limit=200`
     )
     // The search is a substring match on SKU, title and brand; keep this product only.
     const wanted = reference.toUpperCase()
@@ -440,7 +442,7 @@
         el(
           'p',
           { class: 'small' },
-          'Only active products in the repricing range are on the competitor SKU sheet.'
+          'Only products TradePeg currently exports are on the competitor SKU sheet.'
         )
       )
       return
@@ -449,7 +451,11 @@
     const mapped = rows.filter((row) =>
       Object.values(row.mappings ?? {}).some((cell) => cell.competitorSku)
     ).length
-    summary.textContent = `${rows.length} UOM${rows.length === 1 ? '' : 's'} · ${mapped} mapped`
+    // Everything is repriced, but only SELECT goes to the website's pricelist.
+    const published = rows.some((row) => row.is_select !== false)
+    summary.textContent =
+      `${rows.length} UOM${rows.length === 1 ? '' : 's'} · ${mapped} mapped` +
+      (published ? '' : ' · not SELECT: repriced, never published')
     summary.style.display = ''
 
     const table = el(
