@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 05 - SELECT Missing Vendor Price Report
 // @namespace    farla-office-scripts
-// @version      1.5.0
+// @version      1.5.1
 // @description  Adds a TradePeg inventory report showing SELECT items with no vendor price or a blank vendor price.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -427,7 +427,12 @@
           }
           resolve(response.responseText)
         },
-        onerror: () => reject(new Error(`Could not download ${label}.`)),
+        onerror: response => {
+          const detail = response?.error ? ` (${response.error})` : ''
+          reject(new Error(
+            `Could not download ${label}${detail}. Tampermonkey may not have permission for tpresourcesuk.blob.core.windows.net; reinstall Farla 05 once to approve the new @connect permission.`
+          ))
+        },
         ontimeout: () => reject(new Error(`${label} download timed out.`)),
       })
     })
