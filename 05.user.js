@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 05 - SELECT Missing Vendor Price Report
 // @namespace    farla-office-scripts
-// @version      1.5.1
+// @version      1.5.2
 // @description  Adds a TradePeg inventory report showing SELECT items with no vendor price or a blank vendor price.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -413,27 +413,59 @@
     })
   }
 
+  async function browserGetText(url, label) {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'omit',
+      cache: 'no-store',
+      mode: 'cors',
+    })
+    if (!response.ok) throw new Error(`${label} download returned ${response.status}`)
+    return response.text()
+  }
+
   function gmGetText(url, label = 'Vendor Pricing') {
     return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        fn(value)
+      }
+
+      // Prefer Tampermonkey's cross-origin request when its host permission is
+      // already granted. Farla 05 started life as a placeholder, so existing
+      // subscribers may not have approved the later Azure @connect permission.
+      // In that case the signed Azure URL is also tried with ordinary CORS fetch,
+      // allowing the script to remain an automatic update rather than requiring
+      // a reinstall just to approve metadata.
       GM_xmlhttpRequest({
         method: 'GET',
         url,
         anonymous: true,
         timeout: 120000,
         onload(response) {
-          if (response.status < 200 || response.status >= 300) {
-            reject(new Error(`${label} download returned ${response.status}`))
+          if (response.status >= 200 && response.status < 300) {
+            finish(resolve, response.responseText)
             return
           }
-          resolve(response.responseText)
+          browserGetText(url, label).then(
+            text => finish(resolve, text),
+            () => finish(reject, new Error(`${label} download returned ${response.status}`))
+          )
         },
-        onerror: response => {
-          const detail = response?.error ? ` (${response.error})` : ''
-          reject(new Error(
-            `Could not download ${label}${detail}. Tampermonkey may not have permission for tpresourcesuk.blob.core.windows.net; reinstall Farla 05 once to approve the new @connect permission.`
-          ))
+        onerror() {
+          browserGetText(url, label).then(
+            text => finish(resolve, text),
+            error => finish(reject, new Error(`Could not download ${label}: ${error.message}`))
+          )
         },
-        ontimeout: () => reject(new Error(`${label} download timed out.`)),
+        ontimeout() {
+          browserGetText(url, label).then(
+            text => finish(resolve, text),
+            () => finish(reject, new Error(`${label} download timed out.`))
+          )
+        },
       })
     })
   }
