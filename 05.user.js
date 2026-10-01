@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Farla 05 - SELECT Missing Vendor Price Report
+// @name         Farla 05
 // @namespace    farla-office-scripts
-// @version      1.5.2
+// @version      1.5.3
 // @description  Adds a TradePeg inventory report showing SELECT items with no vendor price or a blank vendor price.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
