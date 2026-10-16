@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.0
+// @version      3.14.1
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -158,6 +158,9 @@
     .fpim-backdrop { z-index: 10040; }
     .fpim-modal .modal-body { max-height: calc(100vh - 220px); overflow: auto; }
     .fpim-modal .fpim-options { position: relative; }
+    /* In a dialog a dropdown's list takes room in the page, so the dialog grows to show it rather than cutting it off. */
+    .fpim-modal .fpim-select .selectize-dropdown { position: relative; top: auto; margin-top: 2px; }
+    .fpim-modal .fpim-multi { position: relative; }
     .fpim-menu-button .dropdown-menu { z-index: 1060; }
     .fpim .fpim-facets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .fpim .fpim-facet { position: relative; }
