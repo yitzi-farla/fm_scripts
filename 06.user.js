@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.1
+// @version      3.14.2
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -1211,11 +1211,11 @@
   const FIX_IN = {
     'website title': 'Product',
     description: 'Content',
-    '3+ bullets': 'Content',
     specs: 'Content',
     images: 'Media',
-    'image alt text': 'Media',
     category: 'Classification',
+    'SEO title': 'Channels',
+    'SEO description': 'Channels',
     'variation values': 'Variants',
   }
 
@@ -6224,18 +6224,13 @@
           'div',
           { class: `alert ${failed ? 'alert-danger' : 'alert-success'}` },
           `${plural(results.filter((x) => x.ok).length, 'part')} saved in TradePeg.`,
-          failed ? ` ${failed.sku} was not: ${failed.message}` : '',
-          untouched ? ` ${plural(untouched, 'part')} after it ${untouched === 1 ? 'was' : 'were'} not tried.` : ''
+          failed ? ` ${failed.sku} was not saved: ${failed.message}.` : '',
+          untouched ? ` The ${untouched === 1 ? 'part after it was' : `${untouched} parts after it were`} not tried.` : ''
         ),
         el('table', { class: 'fpim-table' }, el('tbody', {}, results.map((x) => el('tr', {}, el('td', { class: 'fpim-sku' }, x.sku), el('td', {}, x.ok ? [icon('fa-check text-success'), ' ', x.code] : el('span', { class: 'text-danger' }, x.message)))))),
-        el('p', {}, 'The PIM picks this up at its next TradePeg sync. ', button('Sync the PIM now', async (e) => {
-          e.currentTarget.disabled = true
-          try {
-            await request('POST', adminPath('/sync'))
-            toast('success', 'PIM sync started. New parents appear under PIM → Parents in a few minutes.')
-          } catch (error) {
-            toast('danger', error.status === 409 ? 'A PIM sync is already running.' : error.message)
-          }
+        el('p', {}, 'The PIM picks this up at its next TradePeg sync. ', button('Sync the PIM now', () => {
+          d.close()
+          resyncDialog()
         }, 'btn-info'))
       )
       saveBtn.parentElement.replaceChildren(button('Close', () => d.close(), 'btn-primary'))
@@ -6279,11 +6274,14 @@
     if (!res.ok) throw new Error(`TradePeg answered ${res.status}`)
     let answer = null
     try { answer = await res.json() } catch { /* checked below by reading the part again */ }
-    if (answer && answer.success === false) throw new Error(answer.message || answer.error || 'TradePeg refused the save')
+    // Not `success`: TradePeg answers false on saves that worked. Only an error it names, or the part read back, counts.
     if (answer?.error && typeof answer.error === 'string') throw new Error(answer.error)
 
     const after = await readForm()
-    if (after.input.value.trim().toUpperCase() !== code) throw new Error(`TradePeg did not keep the new VARPAR (it shows ${after.input.value || 'nothing'})`)
+    if (after.input.value.trim().toUpperCase() !== code) {
+      const said = answer?.message || answer?.notify
+      throw new Error(`TradePeg did not keep the new VARPAR (it shows ${after.input.value || 'nothing'})${said ? `. It said: ${said}` : ''}`)
+    }
     const now = fields(after.form)
     const moved = [...new Set([...sent.keys(), ...now.keys()])].filter((k) => sent.getAll(k).join('|') !== now.getAll(k).join('|'))
     if (moved.length) throw new Error(`Saved, but TradePeg now shows other fields differently too: ${moved.join(', ')}. Check the part.`)
