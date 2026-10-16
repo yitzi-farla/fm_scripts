@@ -2217,6 +2217,7 @@
     { key: 'unpriced', label: 'Not priced in the repricer yet', fix: 'Price these units in Farla Tools → Repricer, then try again.', test: /^Not priced in the repricer yet:\s*/i },
     { key: 'missing', label: 'Parts missing variation values', fix: 'Give each part a value for every variation type (parent page, or AI → Variations).', test: /^Missing variation values on\s*/i },
     { key: 'same', label: 'Parts with the same variation values', fix: 'No two parts may have the same values: change one, or add a variation type.', test: /\s*have the same variation values$/i },
+    { key: 'unitdesc', label: 'Units without a description', fix: 'Give each unit its description in TradePeg (e.g. "Box of 100"); the PIM picks it up at the next sync.', test: /^Unit descriptions missing in TradePeg:\s*/i },
     { key: 'notypes', label: 'Several parts but no variation types', fix: 'Choose what the parts differ by (Size, Colour…), or AI → Variations.', test: /several parts but no variation types/i },
     { key: 'noparts', label: 'No live parts', fix: 'Every part has ended in TradePeg.', test: /no live parts/i },
   ]
