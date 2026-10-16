@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.13.0
+// @version      3.13.1
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -11,7 +11,6 @@
 // @grant        GM_deleteValue
 // @grant        unsafeWindow
 // @connect      pim.farlamedical.co.uk
-// @connect      farlamedical.co.uk
 // @connect      up.railway.app
 // @connect      localhost
 // @connect      127.0.0.1
@@ -1798,70 +1797,6 @@
   const menuLink = (key, label) =>
     el('a', { href: `#pim/${key}`, 'data-pim': key, onclick: (e) => { e.preventDefault(); openTools(key) } }, label)
 
-  /* ---------------------------------------------------------- website admin */
-
-  /**
-   * The website's own admin (farlamedical.co.uk/admin), signed in as whoever is
-   * signed in to TradePeg — the way 04 signs in to Farla Tools. The website hands
-   * out a one-time code; this posts it as a comment on Farla's own contact, as the
-   * TradePeg user; the website reads the comment's author from TradePeg, deletes
-   * it, and answers with a ticket good for one minute, which the new tab turns into
-   * a session. Nothing secret is in this script.
-   */
-  const WEBSITE_ORIGIN = (GM_getValue('websiteUrl', '') || 'https://farlamedical.co.uk').replace(/\/$/, '')
-
-  function websiteAuth(path, body) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: `${WEBSITE_ORIGIN}/api/auth${path}`,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify(body),
-        anonymous: true,
-        timeout: 30000,
-        onload(response) {
-          let parsed = null
-          try {
-            parsed = JSON.parse(response.responseText)
-          } catch {
-            // Answered below.
-          }
-          if (response.status >= 200 && response.status < 300 && parsed) resolve(parsed)
-          else reject(new Error(parsed?.message || `The website answered ${response.status}`))
-        },
-        onerror: () => reject(new Error(`Could not reach ${WEBSITE_ORIGIN}`)),
-        ontimeout: () => reject(new Error('The website took too long to answer')),
-      })
-    })
-  }
-
-  async function openWebsiteAdmin() {
-    // Opened now, inside the click, or a pop-up blocker stops it; pointed at the admin once signed in.
-    const tab = window.open('about:blank', '_blank')
-    try {
-      toast('info', 'Signing in to the website admin…')
-      const challenge = await websiteAuth('/tradepeg/challenge', {})
-      const lang = location.pathname.split('/')[2] || 'en-gb'
-      const posted = await fetch(`/wapp/${lang}/io/post/`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
-        body: new URLSearchParams({ concept: 'doc-note', baseType: 'CONTACTS', baseId: challenge.contactId, note: challenge.note }),
-      })
-      if (!posted.ok) throw new Error(`TradePeg answered ${posted.status} to the sign-in comment`)
-      const signedIn = await websiteAuth('/tradepeg/verify', { challengeId: challenge.challengeId, handoff: true })
-      // The website deletes the comment too; as its author, so can we.
-      if (signedIn.noteId) void fetch(`/wapp/${lang}/io/post/legacy/?concept=delete-note&noteId=${signedIn.noteId}`, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(() => {})
-      const url = `${WEBSITE_ORIGIN}/admin/tradepeg?ticket=${encodeURIComponent(signedIn.ticket)}`
-      if (tab) tab.location.href = url
-      else window.open(url, '_blank')
-      document.getElementById('fpim-toast')?.remove()
-    } catch (error) {
-      tab?.close()
-      toast('danger', `Website admin: ${error.message}`)
-    }
-  }
-
   /**
    * TradePeg's left-hand menu: a PIM section after Inventory with every page. (TradePeg draws the menu twice,
    * for wide and narrow screens; both get them.)
@@ -1869,12 +1804,7 @@
   function installMenu() {
     for (const inventory of document.querySelectorAll('li.vert_menu_inventory')) {
       if (inventory.parentElement.querySelector(':scope > li.fpim-menu')) continue
-      const sub = el(
-        'ul',
-        { class: 'sub-menu' },
-        PAGES.map(([k, label]) => el('li', { class: `fpim-menu-item fpim-menu-${k}` }, menuLink(k, label))),
-        el('li', { class: 'fpim-menu-item fpim-menu-website' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); void openWebsiteAdmin() } }, 'Website admin'))
-      )
+      const sub = el('ul', { class: 'sub-menu' }, PAGES.map(([k, label]) => el('li', { class: `fpim-menu-item fpim-menu-${k}` }, menuLink(k, label))))
       const group = el(
         'li',
         { class: 'fpim-menu' },
