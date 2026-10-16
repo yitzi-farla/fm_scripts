@@ -2162,7 +2162,8 @@
         applyBtn.disabled = previewBtn.disabled = false
         if (apply) {
           d.close()
-          toast(r.failed?.length ? 'warning' : 'success', `Changed ${plural(r.changed, 'parent')}.${r.failed?.length ? ` ${r.failed.length} could not be saved: ${r.failed.map((x) => `${x.sku} (${x.message})`).join('; ')}` : ''}`)
+          if (r.failed?.length) failedReport(r)
+          else toast('success', `Changed ${plural(r.changed, 'parent')}.`)
           return onDone?.(r)
         }
         fill(out, 
@@ -2205,6 +2206,70 @@
       [button('Cancel', () => d.close()), previewBtn, applyBtn]
     )
     return d
+  }
+
+  /**
+   * What a bulk change could not save, grouped by reason: "Not priced in the
+   * repricer yet — 98 parents", each parent with its details, and a CSV of it
+   * all (one row per parent and reason) to work through or pass on.
+   */
+  const FAIL_REASONS = [
+    { key: 'unpriced', label: 'Not priced in the repricer yet', fix: 'Price these units in Farla Tools → Repricer, then try again.', test: /^Not priced in the repricer yet:\s*/i },
+    { key: 'missing', label: 'Parts missing variation values', fix: 'Give each part a value for every variation type (parent page, or AI → Variations).', test: /^Missing variation values on\s*/i },
+    { key: 'same', label: 'Parts with the same variation values', fix: 'No two parts may have the same values: change one, or add a variation type.', test: /\s*have the same variation values$/i },
+    { key: 'notypes', label: 'Several parts but no variation types', fix: 'Choose what the parts differ by (Size, Colour…), or AI → Variations.', test: /several parts but no variation types/i },
+    { key: 'noparts', label: 'No live parts', fix: 'Every part has ended in TradePeg.', test: /no live parts/i },
+  ]
+  function failedReport(r) {
+    // The server sends each reason on its own; an older one, one sentence to split.
+    const reasonsOf = (x) =>
+      (x.problems?.length ? x.problems : String(x.message ?? '').replace(/^It cannot be Ready yet\.\s*/, '').replace(/\.$/, '').split(/\.\s+(?=[A-Z0-9])/))
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+    const rows = r.failed.flatMap((x) =>
+      reasonsOf(x).map((text) => {
+        const reason = FAIL_REASONS.find((g) => g.test.test(text))
+        const detail = reason ? text.replace(reason.test, '').trim() : text
+        return { sku: x.sku, reason: reason?.key ?? 'other', label: reason?.label ?? 'Other', detail: reason?.key === 'notypes' || reason?.key === 'noparts' ? '' : detail }
+      })
+    )
+    const groups = [...FAIL_REASONS, { key: 'other', label: 'Other', fix: '' }]
+      .map((g) => ({ ...g, rows: rows.filter((x) => x.reason === g.key) }))
+      .filter((g) => g.rows.length)
+    const short = (text) => {
+      const parts = text.split(/,\s*/)
+      return parts.length > 6 ? `${parts.slice(0, 6).join(', ')} and ${parts.length - 6} more` : text
+    }
+    const csv = () => {
+      const cell = (v) => (/[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v))
+      const lines = [['Parent', 'Reason', 'Details'], ...rows.map((x) => [x.sku, x.label, x.detail])].map((l) => l.map(cell).join(','))
+      // With the byte-order mark Excel needs to read it as UTF-8.
+      saveFile({ blob: new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }), name: `pim-not-saved-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')}.csv` })
+    }
+    const d = dialog(
+      `${plural(r.failed.length, 'parent')} not saved`,
+      [
+        el('div', { class: 'alert alert-warning' }, `Changed ${plural(r.changed, 'parent')}. ${plural(r.failed.length, 'parent')} could not be saved, for the reasons below. Download the list to work through it.`),
+        groups.map((g) =>
+          el(
+            'details',
+            { class: 'fpim-issue', open: groups.length === 1 },
+            el('summary', {}, el('span', { class: 'label label-warning' }, new Set(g.rows.map((x) => x.sku)).size), ' ', g.label),
+            el(
+              'div',
+              { class: 'fpim-issue-body' },
+              g.fix ? el('p', { class: 'text-muted' }, g.fix) : null,
+              el(
+                'table',
+                { class: 'fpim-table' },
+                el('tbody', {}, g.rows.map((x) => el('tr', {}, el('td', { class: 'fpim-sku', style: 'white-space:nowrap;width:150px' }, el('a', { href: `#pim/parent/${encodeURIComponent(x.sku)}`, onclick: (e) => { e.preventDefault(); d.close(); openTools('parent', x.sku) } }, x.sku)), el('td', { title: x.detail.length > 80 ? x.detail : null }, short(x.detail) || '—'))))
+              )
+            )
+          )
+        ),
+      ],
+      [button([icon('fa-download'), ' Download the list (CSV)'], csv, 'btn-primary'), button('Close', () => d.close())]
+    )
   }
 
   /**
