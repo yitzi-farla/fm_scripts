@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 07
 // @namespace    farla-office-scripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Website admin sign-in: "Sign in with TradePeg" on farlamedical.co.uk/admin signs you in through TradePeg with nothing to click or paste, and TradePeg's menu gets a "Website admin" link.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -9,7 +9,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @connect      farlamedical.co.uk
-// @run-at       document-idle
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/07.user.js
 // @downloadURL  https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/07.user.js
 // ==/UserScript==
@@ -109,12 +109,22 @@
 
   let running = false
 
+  /**
+   * Remember a sign-in request the moment the page starts (document-start). TradePeg
+   * answers a signed-out visit with its login page, which then redirects by script
+   * and drops the #farla-website-signin marker — waiting for the page to finish
+   * loading was too late to see it.
+   */
+  function capture() {
+    if (!location.hash.includes(SIGNIN_HASH)) return
+    const query = location.hash.includes('?') ? location.hash.slice(location.hash.indexOf('?') + 1) : ''
+    GM_setValue(PENDING, { at: Date.now(), next: adminPath(new URLSearchParams(query).get('next')) })
+    history.replaceState(null, '', location.pathname + location.search)
+    log('sign-in requested; carrying it out once TradePeg is signed in')
+  }
+
   function resume() {
-    if (location.hash.includes(SIGNIN_HASH)) {
-      const query = location.hash.includes('?') ? location.hash.slice(location.hash.indexOf('?') + 1) : ''
-      GM_setValue(PENDING, { at: Date.now(), next: adminPath(new URLSearchParams(query).get('next')) })
-      history.replaceState(null, '', location.pathname + location.search)
-    }
+    capture()
     if (running) return
     const pending = GM_getValue(PENDING, null)
     if (!pending) return
@@ -186,14 +196,19 @@
       console.error('[Farla Website admin]', VERSION, error)
     }
   }
-  tick()
-  let queued = false
-  new MutationObserver(() => {
-    if (queued) return
-    queued = true
-    setTimeout(() => {
-      queued = false
-      tick()
-    }, 100)
-  }).observe(document.body, { childList: true, subtree: true })
+  capture()
+  const start = () => {
+    tick()
+    let queued = false
+    new MutationObserver(() => {
+      if (queued) return
+      queued = true
+      setTimeout(() => {
+        queued = false
+        tick()
+      }, 100)
+    }).observe(document.body, { childList: true, subtree: true })
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true })
+  else start()
 })()
