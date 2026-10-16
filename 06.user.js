@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.13.1
+// @version      3.14.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -3502,7 +3502,94 @@
       ),
       channels
     )
-    if (hasToken()) void channelsSettings(channels, alive)
+    if (hasToken()) {
+      void channelsSettings(channels, alive)
+      const backups = el('div')
+      content.append(backups)
+      void backupsPanel(backups, alive)
+    }
+  }
+
+  /**
+   * The PIM's own backups: its whole database, every night, into a private R2
+   * bucket (repos/pim src/pim/backup.js). The last one, Back up now, and the
+   * newest files to download.
+   */
+  async function backupsPanel(holder, alive) {
+    const MB = (n) => `${(n / 1e6).toFixed(1)} MB`
+    let polling = false
+    async function paint() {
+      let s
+      try {
+        s = await request('GET', adminPath('/backups'))
+      } catch (error) {
+        const box = el('div', { class: 'col-md-12' })
+        toolError(box, error, paint)
+        return fill(holder, tpPanel('Backups', null, el('div', { class: 'formRow fluid' }, box)))
+      }
+      if (!alive()) return
+      const now = headButton([icon(s.running ? 'fa-spinner fa-spin' : 'fa-cloud-upload'), s.running ? ' Backing up…' : ' Back up now'], async () => {
+        try {
+          await request('POST', adminPath('/backups'), { json: { by: tpUser() || null } })
+        } catch (error) {
+          return toast('danger', error.message)
+        }
+        void paint()
+      }, 'btn-success', s.running || !s.ready ? { class: 'btn btn-sm btn-success disabled' } : {})
+      const stat = (label, value, help, cols = 3) => el('div', { class: `col-md-${cols} fpim-field fpim-statcell` }, el('div', { class: 'fpim-stat' }, value), el('div', { class: 'help-block', title: help || null }, label))
+      fill(
+        holder,
+        tpPanel(
+          'Backups',
+          now,
+          el(
+            'div',
+            { class: 'formRow fluid fpim-syncrow' },
+            !s.ready ? el('div', { class: 'col-md-12' }, el('div', { class: 'alert alert-warning' }, 'Backups need the R2 keys on the PIM.')) : null,
+            stat('Last backup', s.last ? ago(s.last.finishedAt) : 'None yet', s.last ? `${when(s.last.finishedAt)} · ${MB(s.last.size)} · ${s.last.tables} tables, ${s.last.rows.toLocaleString('en-GB')} rows` : null),
+            stat('Next', 'Tonight, 2am', `Every night at 2am UK time (${s.schedule})`),
+            stat('Kept', `${s.total} backups`, `Forever, in the private bucket ${s.bucket}: no web address reaches it`),
+            stat('Holds', 'The whole database', 'Every product, variant, category, setting and decision. Pictures are already in R2, so they are not copied.'),
+            el('div', { class: 'clear' }),
+            s.lastError && (!s.last || s.lastError.at > s.last.finishedAt) ? el('div', { class: 'col-md-12' }, el('div', { class: 'alert alert-danger' }, `The last backup failed ${ago(s.lastError.at)}: ${s.lastError.message}`)) : null,
+            s.files.length
+              ? el(
+                  'div',
+                  { class: 'col-md-12' },
+                  el(
+                    'details',
+                    { class: 'fpim-more' },
+                    el('summary', {}, `Newest backups (${Math.min(s.files.length, s.total)} of ${s.total})`),
+                    el(
+                      'table',
+                      { class: 'fpim-table' },
+                      el('tbody', {}, s.files.map((f) => el('tr', {}, el('td', {}, when(f.at)), el('td', { class: 'fpim-mono' }, f.key.split('/').pop()), el('td', {}, MB(f.size)), el('td', {}, button([icon('fa-download'), ' Download'], async (e) => {
+                        const btn = e.currentTarget
+                        btn.disabled = true
+                        try {
+                          saveFile(await request('GET', adminPath(`/backups/download?key=${encodeURIComponent(f.key)}`), { blob: true, timeout: 600000 }))
+                        } catch (error) {
+                          toast('danger', error.message)
+                        } finally {
+                          btn.disabled = false
+                        }
+                      })))))
+                    ),
+                    el('p', { class: 'fpim-help' }, 'To restore: node scripts/pim/restore-backup.js --to <a new, empty database> (repos/pim). Never over the live one.')
+                  )
+                )
+              : null,
+            el('div', { class: 'clear' })
+          )
+        )
+      )
+      if (s.running && !polling) {
+        polling = true
+        setTimeout(() => { polling = false; if (alive()) void paint() }, 4000)
+      }
+    }
+    fill(holder, tpPanel('Backups', null, el('div', { class: 'formRow fluid' }, el('div', { class: 'col-md-12' }, spinner()))))
+    await paint()
   }
 
   // ---------------------------------------------------------------- product fields
@@ -4854,17 +4941,22 @@
         toast('danger', error.message)
       }
     }
-    const panel = tpPanel(
-      'Prompt',
-      [headButton('Default rules', () => { if (confirm('Put back the default rules for everyone?')) void saveRules('') }, 'btn-default'), headButton([icon('fa-check'), ' Save rules'], () => void saveRules(rules.value), 'btn-info'), runBtn],
-      el(
-        'div',
-        { class: 'formRow fluid' },
-        field('Our rules', rules, 'Sent first every time. Saved for everyone with Save rules.', 8),
-        field('Request', extra, 'Only for this run', 4),
-        el('div', { class: 'clear' })
-      )
+    // The rules and request are folded away until asked for; Run is always in the heading.
+    const ruleTools = el('span', { style: 'display:none' }, headButton('Default rules', () => { if (confirm('Put back the default rules for everyone?')) void saveRules('') }, 'btn-default'), ' ', headButton([icon('fa-check'), ' Save rules'], () => void saveRules(rules.value), 'btn-info'))
+    const promptBody = el(
+      'div',
+      { class: 'formRow fluid', hidden: true },
+      field('Our rules', rules, 'Sent first every time. Saved for everyone with Save rules.', 8),
+      field('Request', extra, 'Only for this run', 4),
+      el('div', { class: 'clear' })
     )
+    const toggleBtn = headButton([icon('fa-chevron-down'), ' Show prompt'], () => {
+      const show = promptBody.hidden
+      promptBody.hidden = !show
+      ruleTools.style.display = show ? '' : 'none'
+      fill(toggleBtn, icon(show ? 'fa-chevron-up' : 'fa-chevron-down'), show ? ' Hide prompt' : ' Show prompt')
+    }, 'btn-default')
+    const panel = tpPanel('Prompt', [toggleBtn, ruleTools, runBtn], promptBody)
     return { panel, runBtn, setBusy: (busy, label) => { runBtn.classList.toggle('disabled', busy); fill(runBtn, icon(busy ? 'fa-spinner fa-spin' : 'fa-magic'), ` ${busy ? label : action}`) } }
   }
 
@@ -4883,6 +4975,7 @@
     const titleEl = el('span', {}, title)
     const tools = el('span')
     const table = el('div', {}, spinner())
+    const refreshBtn = headButton([icon('fa-refresh'), ' Refresh'], () => void load(), 'btn-info', { title: 'Read the list again from the PIM' })
     let items = []
     let timer = null
     async function load() {
@@ -4930,7 +5023,7 @@
       'div',
       {},
       tpPanel('Find', null, el('div', { class: 'formRow fluid' }, field('Search', search, null, 6), el('div', { class: 'col-md-3 fpim-field' }, el('label', { style: 'font-weight:normal;margin-top:8px' }, all, ' Show all, not only those that need it')), el('div', { class: 'clear' }))),
-      el('div', { class: 'panel panel-parts fluid mt10' }, el('div', { class: 'panel-heading' }, titleEl, el('div', { class: 'btns pull-right' }, tools)), el('div', { class: 'panel-body p0' }, table))
+      el('div', { class: 'panel panel-parts fluid mt10' }, el('div', { class: 'panel-heading' }, titleEl, el('div', { class: 'btns pull-right' }, tools, refreshBtn)), el('div', { class: 'panel-body p0' }, table))
     )
     void load()
     return { panel, state: s, repaint: () => paint(), reload: load, picked: () => items.filter((x) => s.picked.has(x.id)) }
