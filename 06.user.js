@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.2
+// @version      3.14.3
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -6199,6 +6199,10 @@
       }
       for (const p of parts) Object.assign(p, info.parts.find((x) => x.sku === p.sku))
       paintPlan()
+      // TradePeg already has them all (an earlier save went through after all): nothing to write.
+      if (!current.error && !current.rows.some((r) => r.next && r.found !== false && r.varpar !== r.next)) {
+        return out.prepend(el('div', { class: 'alert alert-success' }, 'Nothing to save: TradePeg already has these parts on these codes.'))
+      }
       if (current.error || current.rows.map((r) => r.next).join() !== shown) {
         return out.prepend(el('div', { class: 'alert alert-warning' }, 'The codes changed since you opened this (someone else saved one). Check the list again, then Save.'))
       }
