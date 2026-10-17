@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.4
+// @version      3.14.6
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -5245,9 +5245,9 @@
     const gridHolder = el('div')
     const notes = el('div')
     const list = aiList(ctx, 'variations', {
-      title: 'VARPARs without full variations',
+      title: 'VARPARs whose variations do not work',
       columns: ['Parent', 'Title', 'Parts', 'Variation types now'],
-      row: (x) => [el('td', { class: 'fpim-sku' }, x.sku), el('td', {}, x.label), el('td', {}, x.parts), el('td', { class: 'text-muted' }, x.types.join(', ') || '—')],
+      row: (x) => [el('td', { class: 'fpim-sku' }, x.sku), el('td', {}, x.label), el('td', {}, x.parts), el('td', { class: 'text-muted' }, x.types.join(', ') || '—', (x.problems ?? []).map((m) => el('div', { class: 'text-danger' }, m)))],
     })
     const prompt = aiPrompt(ctx, 'variations', {
       action: 'Suggest variations for the ticked',
@@ -6089,36 +6089,48 @@
       previewBtn.className = 'btn btn-sm btn-primary'
     }
     value.addEventListener('input', stale)
-    const partOf = (v, skus) => skus.some((s) => s === v.sku || s.replace(/-(UNIT|PACK|CASE)(-NA)?$/i, '') === v.sku)
+    const partCode = (s) => s.replace(/-(UNIT|PACK|CASE)(-NA)?$/i, '')
+    const parentOf = new Map(r.parents.flatMap((p) => p.parts.map((s) => [partCode(s), p.sku])))
+    const PAIRS = 4 // the Variations import's Name / Value columns
 
+    // The whole change is one Variations import: checked in one request, saved in another.
     async function preview() {
       if (!type) return fill(out, el('div', { class: 'alert alert-warning' }, 'Choose the variation type.'))
       if (!value.value.trim()) return fill(out, el('div', { class: 'alert alert-warning' }, 'Type the value.'))
-      fill(out, spinner(' Reading the parents…'))
+      fill(out, spinner(' Reading the parts…'))
       previewBtn.disabled = true
       try {
         if (type.isNew) type = await request('POST', adminPath('/variation-types'), { json: { name: type.name } })
         const want = value.value.trim()
+        const { rows: now } = await request('POST', adminPath('/imports/variations/prefill'), { json: { keys: [...parentOf.keys()] } })
         const lines = []
-        const saves = []
-        for (const p of r.parents) {
-          const data = await request('GET', skuPath(p.sku))
-          const typeIds = data.product.variationTypes.map((t) => t.id)
-          const adding = !typeIds.includes(type.id)
-          const variants = {}
-          for (const v of data.variants.filter((x) => partOf(x, p.parts))) {
-            lines.push({ sku: v.sku, parent: p.sku, now: v.values?.[type.id] ?? '' })
-            if ((v.values?.[type.id] ?? '') !== want) variants[v.documentId] = { values: { ...v.values, [type.id]: want } }
+        const rows = []
+        const adding = new Set()
+        const full = new Set()
+        for (const [sku, row] of Object.entries(now)) {
+          const names = Array.from({ length: PAIRS }, (_, i) => row[`Variation ${i + 1} Name`] ?? '')
+          let at = names.findIndex((n) => n.toLowerCase() === type.name.toLowerCase())
+          if (at < 0) {
+            at = names.findIndex((n) => !n)
+            if (at < 0) { full.add(parentOf.get(sku)); continue }
+            adding.add(parentOf.get(sku))
           }
-          if (Object.keys(variants).length) saves.push({ sku: p.sku, body: { updatedAt: data.product.updatedAt, ...(adding ? { variationTypes: [...typeIds, type.id] } : {}), variants }, adding })
+          const was = names[at] ? row[`Variation ${at + 1} Value`] ?? '' : ''
+          lines.push({ sku, parent: parentOf.get(sku), now: was })
+          if (was !== want) rows.push({ ...row, [`Variation ${at + 1} Name`]: type.name, [`Variation ${at + 1} Value`]: want })
         }
+        const check = rows.length ? await request('POST', adminPath('/imports/variations'), { json: { rows }, timeout: 600000 }) : null
+        const errors = [...(check?.errors ?? []), ...(check?.unknown ?? []).map((u) => ({ sku: u.sku, message: 'not in the PIM' }))]
         previewBtn.disabled = false
-        plan = saves
-        const adding = saves.filter((s) => s.adding).map((s) => s.sku)
+        plan = rows.length && !errors.length ? rows : null
+        const parents = check?.changes?.length ?? 0
         fill(
           out,
-          el('div', { class: `alert ${saves.length ? 'alert-info' : 'alert-warning'}` }, saves.length ? `Nothing is saved yet — check the list, then Apply.` : `Every ticked part already has ${type.name} = ${want}.`),
-          adding.length ? el('div', { class: 'alert alert-warning' }, `${adding.join(', ')} ${adding.length === 1 ? 'does' : 'do'} not use ${type.name} yet. It is added, so every live part of ${adding.length === 1 ? 'it' : 'them'} needs a ${type.name} — tick them all, or the save is refused.`) : null,
+          errors.length
+            ? el('div', { class: 'alert alert-danger' }, `Nothing can be saved yet:`, el('ul', {}, errors.map((e) => el('li', {}, `${e.sku}: ${e.message}`))))
+            : el('div', { class: `alert ${plan ? 'alert-info' : 'alert-warning'}` }, plan ? `Nothing is saved yet — check the list, then Apply.` : `Every ticked part already has ${type.name} = ${want}.`),
+          full.size ? el('div', { class: 'alert alert-warning' }, `${[...full].join(', ')} already ${full.size === 1 ? 'has' : 'have'} ${PAIRS} variation types, so ${full.size === 1 ? 'it is' : 'they are'} left out.`) : null,
+          adding.size ? el('div', { class: 'alert alert-warning' }, `${[...adding].join(', ')} ${adding.size === 1 ? 'does' : 'do'} not use ${type.name} yet. It is added, so every live part of ${adding.size === 1 ? 'it' : 'them'} needs a ${type.name} — tick them all, or the save is refused.`) : null,
           el(
             'table',
             { class: 'fpim-table' },
@@ -6126,31 +6138,29 @@
             el('tbody', {}, lines.map((l) => el('tr', {}, el('td', { class: 'fpim-sku' }, l.sku), el('td', { class: 'fpim-sku' }, l.parent), el('td', {}, l.now || '—'), el('td', {}, want))))
           )
         )
-        fill(applyBtn, icon('fa-check'), ` Apply to ${plural(saves.length, 'parent')}`)
-        applyBtn.style.display = saves.length ? '' : 'none'
-        previewBtn.className = `btn btn-sm ${saves.length ? 'btn-default' : 'btn-primary'}`
+        fill(applyBtn, icon('fa-check'), ` Apply to ${plural(parents, 'parent')}`)
+        applyBtn.style.display = plan ? '' : 'none'
+        previewBtn.className = `btn btn-sm ${plan ? 'btn-default' : 'btn-primary'}`
       } catch (error) {
         previewBtn.disabled = false
-        fill(out, el('div', { class: 'alert alert-danger' }, error.status === 403 ? 'This computer’s PIM token cannot do this (Pim → update and admin).' : error.message))
+        fill(out, el('div', { class: 'alert alert-danger' }, error.status === 403 ? 'This computer’s PIM token cannot do this (Pim → admin).' : error.message))
       }
     }
 
     async function apply() {
       if (!plan) return
       applyBtn.disabled = previewBtn.disabled = true
-      const failed = []
-      for (const [i, s] of plan.entries()) {
-        fill(applyBtn, icon('fa-spinner fa-spin'), ` Saving ${i + 1} of ${plan.length}…`)
-        try {
-          await request('PUT', skuPath(s.sku), { json: s.body })
-        } catch (error) {
-          failed.push(`${s.sku}: ${error.status === 409 ? 'changed by someone else since the preview' : error.message}`)
-        }
+      fill(applyBtn, icon('fa-spinner fa-spin'), ' Saving…')
+      try {
+        const res = await request('POST', adminPath('/imports/variations?apply=1'), { json: { rows: plan, apply: true }, timeout: 600000 })
+        if (!res.applied) throw new Error([...(res.errors ?? []).map((e) => `${e.sku}: ${e.message}`), 'Nothing was saved.'].join(' '))
+        d.close()
+        toast('success', `Saved ${plural(res.changes.length, 'parent')}.`)
+      } catch (error) {
+        applyBtn.disabled = previewBtn.disabled = false
+        fill(applyBtn, icon('fa-check'), ' Apply')
+        out.prepend(el('div', { class: 'alert alert-danger' }, error.message))
       }
-      d.close()
-      if (failed.length) {
-        const f = dialog('Some parents were not saved', [el('p', {}, `${plural(plan.length - failed.length, 'parent')} saved. Not saved:`), el('ul', {}, failed.map((x) => el('li', {}, x)))], [button('Close', () => f.close())])
-      } else toast('success', `Saved ${plural(plan.length, 'parent')}.`)
     }
 
     const d = dialog(
