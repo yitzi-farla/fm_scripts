@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.3
+// @version      3.14.4
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -3492,38 +3492,110 @@
     await fetchTree()
   }
 
-  /** Google's and eBay's trees: thousands of nodes, so searched rather than drawn. */
+  /**
+   * Google's and eBay's trees, drawn like ours but read-only (they own them).
+   * Only open branches are drawn, so thousands of categories stay quick;
+   * finding shows each match with the categories above it.
+   */
   function codedTree(area, alive, which) {
     const name = which === 'google' ? 'Google' : 'eBay'
-    const q = el('input', { class: 'form-control', placeholder: `Search ${name} categories by name or number…`, style: 'max-width:420px' })
-    const list = el('div')
-    let timer = null
-    let asked = 0
+    const LIMIT = 300
+    const st = (toolState[`tree-${which}`] ??= { open: new Set(), q: '' })
+    const q = el('input', { class: 'form-control', type: 'search', value: st.q, 'aria-label': `Find a ${name} category` })
+    const list = el('div', { class: 'fpim-cats' }, spinner())
+    const count = el('span', { class: 'fpim-count' })
+    let rows = []
+    let byId = new Map()
+
     const search = async () => {
-      const mine = ++asked
       fill(list, spinner())
+      let data
       try {
-        const hits = await request('GET', `/api/pim/options/${which}?q=${encodeURIComponent(q.value.trim())}&limit=100`)
-        if (!alive() || mine !== asked) return
-        fill(list, 
-          hits.length
-            ? el('table', { class: 'fpim-table' }, el('tbody', {}, hits.map((h) => el('tr', {}, el('td', { class: 'fpim-sku', style: 'width:90px' }, h.code ?? ''), el('td', {}, h.path)))))
-            : el('p', { class: 'text-muted' }, q.value.trim() ? 'Nothing matches.' : `No ${name} categories yet — import them below.`),
-          hits.length === 100 ? el('p', { class: 'fpim-help' }, 'Showing the first 100. Type more to narrow it down.') : null
-        )
+        data = await request('GET', adminPath(`/trees/${which}`))
       } catch (error) {
-        if (alive() && mine === asked) toolError(list, error, search)
+        if (alive()) toolError(list, error, search)
+        return
       }
+      if (!alive()) return
+      rows = []
+      byId = new Map()
+      const index = (nodes, parentId) =>
+        nodes.forEach((n) => {
+          rows.push(n)
+          byId.set(n.id, { node: n, parentId })
+          index(n.children, n.id)
+        })
+      index(data.roots, null)
+      fill(count, `${data.count.toLocaleString()} categories`)
+      paint()
     }
+
+    function renderNode(n, finding) {
+      const open = finding || st.open.has(n.id)
+      const toggle = () => {
+        if (!n.children.length || finding) return
+        if (open) st.open.delete(n.id)
+        else st.open.add(n.id)
+        paint()
+      }
+      return el(
+        'div',
+        { class: 'fpim-cat' },
+        el(
+          'button',
+          { type: 'button', class: 'fpim-twisty', 'aria-label': n.children.length ? `${open ? 'Close' : 'Open'} ${n.name}` : null, 'aria-expanded': n.children.length ? String(open) : null, disabled: !n.children.length || finding, onclick: toggle },
+          n.children.length ? icon(open ? 'fa-chevron-down' : 'fa-chevron-right') : null
+        ),
+        icon(`${open && n.children.length ? 'fa-folder-open' : 'fa-folder'} fpim-folder`),
+        el('span', { class: 'fpim-name', title: n.path, onclick: toggle }, n.name),
+        n.children.length ? el('span', { class: 'fpim-count' }, `${n.children.length} inside`) : null,
+        el('span', { class: 'fpim-grow' }),
+        el('span', { class: 'fpim-sku', title: `${name} category number` }, n.code ?? '')
+      )
+    }
+
+    function paint() {
+      const term = st.q.toLowerCase()
+      if (!rows.length) return fill(list, el('p', { class: 'text-muted' }, `No ${name} categories yet — import them below.`))
+      if (!term) {
+        const draw = (nodes) => el('ul', {}, nodes.map((n) => el('li', {}, renderNode(n, false), st.open.has(n.id) && n.children.length ? draw(n.children) : null)))
+        return fill(list, draw(rows.filter((n) => !byId.get(n.id).parentId)))
+      }
+      // Matches plus the categories above them, kept as a tree.
+      const keep = new Set()
+      for (const n of rows) {
+        if (!n.path.toLowerCase().includes(term) && n.code !== term) continue
+        for (let at = n.id; at != null && !keep.has(at); at = byId.get(at)?.parentId) keep.add(at)
+      }
+      let left = LIMIT
+      const draw = (nodes) => el('ul', {}, nodes.filter((n) => keep.has(n.id) && left-- > 0).map((n) => el('li', {}, renderNode(n, true), draw(n.children))))
+      fill(
+        list,
+        keep.size ? draw(rows.filter((n) => !byId.get(n.id).parentId)) : el('p', { class: 'text-muted' }, 'Nothing matches.'),
+        keep.size > LIMIT ? el('p', { class: 'fpim-help' }, `Showing the first ${LIMIT} of ${keep.size.toLocaleString()}. Type more to narrow it down.`) : null
+      )
+    }
+
+    let timer = null
     q.addEventListener('input', () => {
       clearTimeout(timer)
-      timer = setTimeout(search, 250)
+      timer = setTimeout(() => {
+        st.q = q.value.trim()
+        paint()
+      }, 200)
     })
     const googleOut = el('div')
     fill(area, 
-      el('p', { class: 'fpim-help' }, `${name}’s own category list. Products pick from it on the product page, or inherit it from one of our categories (Our categories → Google / eBay).`),
-      q,
-      el('div', { style: 'margin-top:8px' }, list),
+      el('p', { class: 'fpim-help' }, `${name}’s own category tree. Products pick from it on the product page, or inherit it from one of our categories (Our categories → Google / eBay).`),
+      el(
+        'div',
+        { class: 'fpim-row' },
+        el('div', { class: 'fpim-field', style: 'flex:0 1 420px' }, q, el('div', { class: 'help-block' }, 'Find by name or number')),
+        headButton('Open all', () => { for (const id of byId.keys()) st.open.add(id); paint() }, 'btn-default'),
+        headButton('Close all', () => { st.open.clear(); paint() }, 'btn-default'),
+        count
+      ),
+      list,
       which === 'google'
         ? el(
             'div',
