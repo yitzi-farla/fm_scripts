@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.14.6
+// @version      3.15.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -145,6 +145,8 @@
     .fpim .fpim-selbar strong { margin-right: 4px; }
     #fpim-savebar { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 10000; display: flex; gap: 10px; align-items: center; background: #fff; border: 1px solid #e6d28a; box-shadow: 0 4px 16px rgba(0,0,0,.18); padding: 8px 12px; }
     #fpim-savebar .fpim-dirty { margin: 0; }
+    .fpim-push-badge { margin-left: 6px; background: #fff !important; color: #c67605 !important; }
+    li.fpim-menu-publish .fpim-push-badge { background: #f0ad4e !important; color: #fff !important; }
     #fpim-toast { position: fixed; top: 16px; right: 16px; z-index: 10100; max-width: 420px; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
     .fpim .fpim-jump { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; gap: 4px; background: #fff; border-bottom: 1px solid #e3e3e3; padding: 6px 0; margin-bottom: 12px; }
     .fpim .fpim-vtable { width: 100%; }
@@ -1596,6 +1598,233 @@
     )
   }
 
+  // ---------------------------------------------------------------- website queue
+
+  /**
+   * What has changed in the PIM and not reached the website yet (the PIM's push
+   * queue, src/pim/search.js): a count on the Publish menu entry and on every
+   * PIM page's "Push to website" button, read every 20 seconds.
+   */
+  let pushes = null
+  const pushButtons = new Set()
+  async function readPushes() {
+    if (!hasToken()) return null
+    try {
+      pushes = await request('GET', adminPath('/pushes'))
+    } catch {
+      return pushes
+    }
+    paintPushCounts()
+    return pushes
+  }
+  const pushBadge = (n) => (n ? el('span', { class: 'badge fpim-push-badge' }, String(n)) : null)
+  function paintPushCounts() {
+    const n = pushes?.waiting?.length ?? 0
+    for (const b of [...pushButtons]) {
+      if (!b.isConnected) {
+        pushButtons.delete(b)
+        continue
+      }
+      fill(b, icon(pushes?.sending ? 'fa-spinner fa-spin' : 'fa-cloud-upload'), ' Push to website', pushBadge(n))
+      b.className = `btn ${n ? 'btn-warning' : 'btn-default'}`
+      b.title = n ? `${plural(n, 'change')} not on the website yet` : 'Everything is on the website'
+    }
+    for (const a of document.querySelectorAll('li.fpim-menu-publish > a, .fpim-menu-button a[href="#pim/publish"]')) {
+      const ic = a.querySelector('i.fa')
+      fill(a, ic, ic ? ' Publish' : 'Publish', pushBadge(n))
+    }
+  }
+  function pushButton() {
+    const b = el('a', { href: '#', role: 'button', onclick: (e) => { e.preventDefault(); pushDialog() } })
+    pushButtons.add(b)
+    paintPushCounts()
+    return b
+  }
+  setInterval(() => { if (document.visibilityState === 'visible') void readPushes() }, 20000)
+  setTimeout(() => void readPushes(), 1500)
+
+  /** One queue entry in words: the parent and its title, or what else changed. */
+  const pushWhat = (e) =>
+    e.kind === 'product' ? [el('span', { class: 'fpim-sku' }, e.sku ?? '…'), ' ', el('span', { class: 'text-muted' }, e.label ?? '')]
+      : e.kind === 'removed' ? [el('span', { class: 'fpim-sku' }, e.sku), ' ', el('span', { class: 'text-muted' }, 'deleted')]
+        : el('strong', {}, e.label)
+  const PUSH_ICON = {
+    waiting: () => el('span', { class: 'text-muted' }, icon('fa-clock-o'), ' Waiting'),
+    sending: () => el('span', { class: 'text-info' }, icon('fa-spinner fa-spin'), ' Sending'),
+    done: () => el('span', { class: 'text-success' }, icon('fa-check'), ' Sent'),
+    failed: (e) => el('span', { class: 'text-danger', title: e?.error ?? '' }, icon('fa-times'), ' Failed'),
+  }
+  const modeLine = () =>
+    pushes?.mode === 'manual'
+      ? 'Changes wait here until someone presses Push.'
+      : 'Changes go to the website by themselves a few seconds after each save; Push sends anything still waiting now.'
+  const progressBar = (done, total) =>
+    el('div', { class: 'progress', style: 'margin:8px 0' }, el('div', { class: 'progress-bar progress-bar-success', style: `width:${total ? Math.round((done / total) * 100) : 100}%;min-width:2em` }, total ? `${done} / ${total}` : '…'))
+
+  /** Push what is waiting (or every product), showing each change go. */
+  function pushDialog() {
+    const body = el('div', {}, spinner())
+    const foot = el('span')
+    const d = dialog('Push to the website', [body], [foot])
+    let mine = null // { keys, at, all } once Push is pressed
+    const rowsOf = (list, statusOf) =>
+      el(
+        'table',
+        { class: 'fpim-table' },
+        el('thead', {}, el('tr', {}, el('th', {}, 'What changed'), el('th', {}, 'Saved'), el('th', {}, 'Status'))),
+        el(
+          'tbody',
+          {},
+          list.slice(0, 300).map((e) => el('tr', {}, el('td', {}, pushWhat(e)), el('td', { class: 'text-muted' }, ago(e.lastAt), e.count > 1 ? ` · ${e.count} saves` : ''), el('td', {}, PUSH_ICON[statusOf(e)](e))))
+        ),
+        list.length > 300 ? el('tfoot', {}, el('tr', {}, el('td', { colspan: 3, class: 'text-muted' }, `and ${list.length - 300} more`))) : null
+      )
+
+    async function go(all) {
+      if (all && !confirm('Send every product in the PIM to the website again? This takes a few minutes.')) return
+      fill(foot, button([icon('fa-spinner fa-spin'), ' Starting…'], () => {}, 'btn-success', { disabled: true }))
+      try {
+        const keys = all ? ['all'] : pushes.waiting.map((e) => e.key)
+        // "Since" by the server's own clock: the newest entry it had sent before this.
+        mine = { keys: new Set(keys), since: pushes.history?.[0]?.doneAt ?? '', all, entries: new Map((pushes.waiting ?? []).map((e) => [e.key, e])) }
+        await request('POST', adminPath('/pushes'), { json: { all, by: tpUser() || null } })
+      } catch (error) {
+        mine = null
+        body.prepend(el('div', { class: 'alert alert-danger' }, error.message))
+      }
+      void tick()
+    }
+
+    function paint() {
+      const waiting = pushes?.waiting ?? []
+      const sending = pushes?.sending
+      if (!mine) {
+        const n = waiting.length
+        fill(
+          body,
+          el('p', { class: 'fpim-help' }, modeLine()),
+          sending ? el('div', { class: 'alert alert-info' }, icon('fa-spinner fa-spin'), ` A push is going now (${sending.by ?? 'automatic'})`, progressBar(sending.done, sending.total)) : null,
+          n ? rowsOf(waiting, () => 'waiting') : el('div', { class: 'alert alert-success' }, icon('fa-check'), ' Nothing is waiting: the website has every change.')
+        )
+        fill(
+          foot,
+          button('Close', () => d.close()),
+          button([icon('fa-refresh'), ' Push every product'], () => void go(true), 'btn-default', { title: 'Send the whole catalogue again, changed or not' }),
+          button([icon('fa-cloud-upload'), n ? ` Push ${plural(n, 'change')}` : ' Push'], () => void go(false), 'btn-success', { disabled: !n })
+        )
+        return
+      }
+      // After Push: each of ours, by where it is now.
+      const inSending = new Map((sending?.entries ?? []).map((e) => [e.key, e]))
+      const inWaiting = new Map(waiting.map((e) => [e.key, e]))
+      const done = new Map((pushes?.history ?? []).filter((e) => e.doneAt > mine.since).map((e) => [e.key, e]))
+      const statusOf = (e) => {
+        const h = done.get(e.key)
+        if (h?.status === 'failed') return 'failed'
+        if (inSending.has(e.key)) return inSending.get(e.key).status
+        if (inWaiting.has(e.key)) return 'waiting'
+        return 'done'
+      }
+      const list = [...mine.keys].map((k) => ({ ...(mine.entries.get(k) ?? { key: k, kind: 'all', label: 'Every product', lastAt: new Date().toISOString(), count: 1 }), ...(inSending.get(k) ?? done.get(k) ?? {}) }))
+      const states = list.map(statusOf)
+      const finished = states.every((s) => s === 'done' || s === 'failed')
+      const failed = list.filter((e, i) => states[i] === 'failed')
+      const products = list.filter((e) => e.kind === 'product')
+      const total = mine.all ? sending?.total : products.length
+      const sent = mine.all ? (finished ? total : sending?.done ?? 0) : products.filter((e) => statusOf(e) === 'done').length
+      fill(
+        body,
+        finished
+          ? failed.length
+            ? el('div', { class: 'alert alert-danger' }, `${plural(failed.length, 'change')} could not be sent: ${failed[0].error ?? 'unknown error'}. ${failed.length === 1 ? 'It is' : 'They are'} back in the queue — try Push again.`)
+            : el('div', { class: 'alert alert-success' }, icon('fa-check'), ' Sent. The website shows it within about two minutes, once it rebuilds.')
+          : el('div', { class: 'alert alert-info' }, icon('fa-spinner fa-spin'), ' Sending to the website…'),
+        mine.all || products.length ? progressBar(sent ?? 0, total) : null,
+        rowsOf(list, statusOf)
+      )
+      fill(foot, button('Close', () => d.close(), finished ? 'btn-primary' : 'btn-default'))
+      return finished
+    }
+
+    async function tick() {
+      await readPushes()
+      if (!d.modal.isConnected) return
+      const finished = paint()
+      if (mine && finished) return
+      // Every second while ours is going, every five while just looking.
+      setTimeout(() => void tick(), mine ? 1000 : 5000)
+    }
+    void tick()
+  }
+
+  /** The Publish page: when changes go to the website, what is waiting, what went lately. */
+  async function publishTool(content, alive) {
+    const out = el('div')
+    fill(content, out)
+    async function paint() {
+      if (!alive()) return
+      await readPushes()
+      if (!pushes) return fill(out, el('div', { class: 'alert alert-danger' }, 'Could not read the website queue.'))
+      if (!pushes.enabled) return fill(out, el('div', { class: 'alert alert-warning' }, 'Pushing to the website is off on this PIM (MEILISEARCH_URL is not set).'))
+      const mode = (value, label, help) =>
+        el(
+          'label',
+          { class: 'radio', style: 'display:block;margin:6px 0' },
+          el('input', {
+            type: 'radio',
+            name: 'fpim-push-mode',
+            checked: pushes.mode === value,
+            onchange: async () => {
+              try {
+                await request('PUT', adminPath('/pushes/mode'), { json: { mode: value } })
+                toast('success', value === 'manual' ? 'Changes now wait for Push to website.' : 'Changes now go to the website by themselves.')
+              } catch (error) {
+                toast('danger', error.message)
+              }
+              void paint()
+            },
+          }),
+          ` ${label}`,
+          el('div', { class: 'help-block' }, help)
+        )
+      const history = pushes.history ?? []
+      fill(
+        out,
+        tpPanel(
+          'When changes go to the website',
+          null,
+          el(
+            'div',
+            { class: 'formRow fluid' },
+            el(
+              'div',
+              { class: 'col-md-12' },
+              mode('auto', 'Automatically', 'A few seconds after each save.'),
+              mode('manual', 'Only when someone presses Push to website', 'Changes wait in the list below. The TradePeg sync still sends its own changes straight away.')
+            )
+          )
+        ),
+        tpPanel(
+          `Waiting (${pushes.waiting.length})`,
+          [pushButton()],
+          pushes.sending ? el('div', { class: 'alert alert-info', style: 'margin:10px 12px' }, icon('fa-spinner fa-spin'), ` Sending now (${pushes.sending.by ?? 'automatic'})`, progressBar(pushes.sending.done, pushes.sending.total)) : null,
+          pushes.waiting.length
+            ? el('table', { class: 'fpim-table' }, el('thead', {}, el('tr', {}, el('th', {}, 'What changed'), el('th', {}, 'First saved'), el('th', {}, 'Last saved'), el('th', {}, 'Saves'))), el('tbody', {}, pushes.waiting.map((e) => el('tr', {}, el('td', {}, pushWhat(e)), el('td', {}, ago(e.firstAt)), el('td', {}, ago(e.lastAt)), el('td', {}, String(e.count))))))
+            : el('p', { class: 'text-muted', style: 'margin:10px 12px' }, icon('fa-check text-success'), ' Nothing waiting: the website has every change.')
+        ),
+        tpPanel(
+          'Sent lately',
+          null,
+          history.length
+            ? el('table', { class: 'fpim-table' }, el('thead', {}, el('tr', {}, el('th', {}, 'What changed'), el('th', {}, 'Sent'), el('th', {}, 'By'), el('th', {}, 'Status'))), el('tbody', {}, history.map((e) => el('tr', {}, el('td', {}, pushWhat(e)), el('td', {}, ago(e.doneAt)), el('td', { class: 'text-muted' }, e.by ?? ''), el('td', {}, PUSH_ICON[e.status](e), e.status === 'failed' && e.error ? el('div', { class: 'text-danger fpim-help' }, e.error) : null)))))
+            : el('p', { class: 'text-muted', style: 'margin:10px 12px' }, 'Nothing sent since the PIM last started.')
+        )
+      )
+      setTimeout(() => void paint(), 5000)
+    }
+    void paint()
+  }
+
   // ================================================================ PIM pages
 
   /**
@@ -1610,6 +1839,7 @@
     ['brands', 'Brands', 'fa-tag'],
     ['import', 'Import', 'fa-upload'],
     ['ai', 'AI', 'fa-magic'],
+    ['publish', 'Publish', 'fa-cloud-upload'],
     ['settings', 'Settings', 'fa-cog'],
   ]
   // Settings holds the rarer pages, switched between at its top.
@@ -1714,7 +1944,7 @@
         'div',
         { class: 'module-header-holder' },
         el('h3', { class: 'page-title pull-left' }, title),
-        el('div', { class: 'btns-mod-header pull-right' }, manageMenu(menuKey(key)), ' ', actions),
+        el('div', { class: 'btns-mod-header pull-right' }, manageMenu(menuKey(key)), ' ', pushButton(), ' ', actions),
         el('div', { class: 'clear' })
       ),
       el('div', { class: 'clear' }),
@@ -1761,6 +1991,7 @@
       fields: fieldsTool,
       ai: aiTool,
       brands: brandsTool,
+      publish: publishTool,
     })[key](target, alive)
   }
 
