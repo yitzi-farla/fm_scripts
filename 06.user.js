@@ -2612,7 +2612,7 @@
         el('p', {}, el('span', { class: 'fpim-dot', style: `background:${colour}` }), el('strong', {}, tp || running ? words : 'Not synced yet')),
         el('p', { class: 'text-muted' }, `Last checked ${ago(tp?.checkedAt ?? tp?.finishedAt)}`),
         issues
-          ? el('p', {}, el('a', { href: '#pim/sync', class: 'text-warning', onclick: (e) => { e.preventDefault(); openTools('sync') } }, icon('fa-exclamation-triangle'), ` ${s.issues.errors ?? 0} errors, ${s.issues.warnings ?? 0} warnings to fix`))
+          ? el('p', {}, el('a', { href: '#pim/sync', class: 'text-warning', onclick: (e) => { e.preventDefault(); openTools('sync') } }, icon('fa-exclamation-triangle'), ` ${s.issues.errors ?? 0} error${s.issues.errors === 1 ? '' : 's'}, ${s.issues.warnings ?? 0} warning${s.issues.warnings === 1 ? '' : 's'} to fix`))
           : null
       )
     }
