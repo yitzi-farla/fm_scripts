@@ -2210,7 +2210,7 @@
       ai: aiTool,
       brands: brandsTool,
       publish: publishTool,
-    })[key](target, alive)
+    })[key](target, alive, ...(key === 'ai' ? [arg] : []))
   }
 
   /** The page in the address, drawn if it is not already on screen. */
@@ -4915,14 +4915,16 @@
    * panel with Import at the top right, a dropzone for a spreadsheet, the
    * options, and a grid to type or paste rows into, with notes underneath.
    * A dropped file fills the grid; typing a SKU fills its row with what the PIM
-   * has now, so only what you change is changed. Import checks first and lists
-   * every change (problem rows turn red); Confirm saves. Nothing is ever
-   * created — SKUs come only from TradePeg.
+   * has now, so only what you change is changed. Two steps: Check is a dry run
+   * that colours the rows (problems red, changes green) and says what would
+   * change; Import saves, and is offered only after a check that passed with
+   * changes — editing any cell needs a new Check. Nothing is ever created —
+   * SKUs come only from TradePeg.
    */
   /**
-   * `preset` embeds the grid elsewhere (the AI page): { kind, rows, columns?,
-   * title, note, onDone } — locked to that import, showing only `columns`,
-   * filled with `rows`, with its own Import button. Its rows are not the Import
+   * `preset` embeds the grid elsewhere: { kind, rows, columns?, title, note,
+   * onDone } — locked to that import, showing only `columns`, filled with
+   * `rows`, with its own Check and Import buttons. Its rows are not the Import
    * page's.
    */
   async function importTool(content, alive, preset = null) {
@@ -4950,12 +4952,25 @@
     const result = el('div')
     const tableHolder = el('div', { class: 'fpim-sheet' })
     const note = el('div')
-    const importBtn = el('a', { class: 'btn btn-sm btn-success', href: '#', onclick: (e) => { e.preventDefault(); void go() } })
-    const paintImportBtn = () => fill(importBtn, [icon('fa-upload'), ' Import'])
+    let busy = null // 'check' | 'import' while the PIM works on the rows
+    const checkBtn = el('a', { class: 'btn btn-sm btn-info', href: '#', title: 'See what would change; nothing is saved', onclick: (e) => { e.preventDefault(); if (!checkBtn.classList.contains('disabled')) void go(false) } })
+    const importBtn = el('a', { class: 'btn btn-sm btn-success', href: '#', onclick: (e) => { e.preventDefault(); if (!importBtn.classList.contains('disabled')) void go(true) } })
+    /** Import is ready only after a check that passed with changes, while the grid is as it was checked. */
+    const ready = () => Boolean(checked && !checked.applied && !(checked.errors ?? []).length && (checked.changes ?? []).length)
+    const paintImportBtn = () => {
+      fill(checkBtn, icon(busy === 'check' ? 'fa-spinner fa-spin' : 'fa-check-circle'), ' Check')
+      checkBtn.classList.toggle('disabled', Boolean(busy))
+      const n = ready() ? checked.changes.length : 0
+      fill(importBtn, icon(busy === 'import' ? 'fa-spinner fa-spin' : 'fa-upload'), ` Import${n ? ` ${plural(n, 'change')}` : ''}`)
+      importBtn.classList.toggle('disabled', Boolean(busy) || !n)
+      importBtn.title = n ? '' : 'Check first: Import is ready once a check passes with changes'
+    }
+    /** Any edit makes the last check out of date: its result goes, and Import needs a new Check. */
     const changedGrid = () => {
       if (!checked) return
       checked = null
       paintImportBtn()
+      fill(result)
       for (const tr of tableHolder.querySelectorAll('tr.danger, tr.success')) tr.classList.remove('danger', 'success')
       if (marks.size) {
         marks.clear()
@@ -5351,7 +5366,7 @@
           el(
             'div',
             { class: 'alert alert-info' },
-            `Read ${plural(r.rows.length, 'row')} from ${r.file}. Check them in the grid, then Import.`,
+            `Read ${plural(r.rows.length, 'row')} from ${r.file}. Check them in the grid, then press Check.`,
             r.more ? ` Only the first 5,000 are shown; ${r.more} more were left out — split the file.` : '',
             ignored.length ? el('div', { style: 'margin-top:4px' }, `Columns not used here: ${ignored.join(', ')}.`) : null
           )
@@ -5379,69 +5394,117 @@
       void readFile(e.dataTransfer?.files?.[0])
     })
 
-    // ------------------------------------------------ Import: check, then confirm
-    async function go() {
+    // ------------------------------------------------ Check, then Import
+    const fieldsOf = (fields) => (Array.isArray(fields) ? fields : Object.keys(fields ?? {}))
+    const changesTable = (changes) =>
+      el(
+        'div',
+        { style: 'max-height:300px;overflow:auto' },
+        el(
+          'table',
+          { class: 'fpim-table' },
+          el('thead', {}, el('tr', {}, el('th', {}, keyCol()), el('th', {}, 'Fields changing'))),
+          el('tbody', {}, changes.slice(0, 200).map((c) => el('tr', {}, el('td', { class: 'fpim-sku' }, c.sku), el('td', {}, fieldsOf(c.fields).join(', ')))))
+        ),
+        changes.length > 200 ? el('p', { class: 'fpim-help' }, `…and ${changes.length - 200} more.`) : null
+      )
+
+    /** Problem rows red (with the problem on hover), rows that change green — in the grid itself. */
+    function markRows(r) {
+      const bad = new Map()
+      const add = (line, message) => bad.set(Number(line), [...(bad.get(Number(line)) ?? []), message])
+      for (const e of r.errors ?? []) add(e.line, e.message)
+      for (const u of r.unknown ?? []) add(u.line, `${u.sku} is not in the PIM`)
+      const good = new Set((r.changes ?? []).map((c) => String(c.sku)))
+      const isGood = (row) => good.has(String(row?.[keyCol()] ?? '').trim())
+      if (hot) {
+        marks.clear()
+        data().forEach((row, i) => {
+          if (bad.has(i + 1)) marks.set(i, 'danger')
+          else if (isGood(row)) marks.set(i, 'success')
+        })
+        hot.render()
+      }
+      for (const tr of tableHolder.querySelectorAll('tbody tr')) {
+        const i = Number(tr.dataset.index)
+        tr.classList.toggle('danger', bad.has(i + 1))
+        tr.classList.toggle('success', !bad.has(i + 1) && isGood(data()[i]))
+        tr.title = (bad.get(i + 1) ?? []).join('; ')
+      }
+    }
+
+    /** What a check found: ready, nothing to do, or rows to fix — and the table of changes or problems. */
+    function showCheck(r) {
+      const errors = r.errors ?? []
+      const changes = r.changes ?? []
+      const unknown = r.unknown ?? []
+      const ok = !errors.length
+      const sub = [
+        r.unchanged ? `${r.unchanged} already match.` : null,
+        unknown.length ? `${unknown.length} not in the PIM: ${unknown.slice(0, 8).map((u) => u.sku).join(', ')}${unknown.length > 8 ? '…' : ''}` : null,
+      ].filter(Boolean)
+      fill(
+        result,
+        el(
+          'div',
+          { class: `alert ${!ok ? 'alert-danger' : changes.length ? 'alert-success' : 'alert-warning'}`, role: 'status' },
+          el('strong', {}, ok ? (changes.length ? `Ready: ${plural(changes.length, 'product')} will change` : 'Nothing would change') : `${plural(errors.length, 'row')} need fixing — nothing was saved`),
+          sub.length ? el('div', {}, sub.join(' ')) : null
+        ),
+        errors.length
+          ? el(
+              'div',
+              { style: 'max-height:300px;overflow:auto' },
+              el('table', { class: 'fpim-table' }, el('thead', {}, el('tr', {}, el('th', {}, 'Row'), el('th', {}, keyCol()), el('th', {}, 'Problem'))), el('tbody', {}, errors.map((e) => el('tr', {}, el('td', {}, e.line ?? ''), el('td', { class: 'fpim-sku' }, e.sku ?? ''), el('td', { class: 'text-danger' }, e.message)))))
+            )
+          : changes.length
+            ? changesTable(changes)
+            : null
+      )
+    }
+
+    /** apply = false: Check, a dry run. apply = true: Import, after a check that passed. */
+    async function go(apply) {
       const rows = filled().map(({ r, line }) => ({ ...r, line }))
       if (!rows.length) return fill(result, el('div', { class: 'alert alert-warning' }, `Type or paste some rows first — at least the ${keyCol()} column.`))
-      // One press: the PIM checks every row and saves only if all of them are right.
-      const apply = true
-      fill(result, spinner(' Importing…'))
-      importBtn.classList.add('disabled')
+      if (apply && !ready()) return
+      busy = apply ? 'import' : 'check'
+      paintImportBtn()
+      fill(result, spinner(apply ? ' Importing…' : ' Checking…'))
+      let r
       try {
-        const r = await request('POST', adminPath(`/imports/${st.kind}${apply ? '?apply=1' : ''}`), { json: { rows, apply }, timeout: 600000 })
-        if (!alive()) return
-        importBtn.classList.remove('disabled')
-        const errors = r.errors ?? []
-        if (r.applied || !errors.length) {
-          const done = r.changes ?? []
-          checked = null
-          st.rows[st.kind] = []
-          paintGrid()
-          fill(
-            result,
-            el('div', { class: `alert ${done.length ? 'alert-success' : 'alert-warning'}` }, done.length ? `Imported ${plural(done.length, 'change')}. The website picks them up within a few minutes.` : 'Nothing changed: the rows match what the PIM has.'),
-            done.length
-              ? el('details', { class: 'fpim-more' }, el('summary', {}, 'What changed'), el('table', { class: 'fpim-table' }, el('tbody', {}, done.slice(0, 500).map((c) => el('tr', {}, el('td', { class: 'fpim-sku' }, c.sku), el('td', {}, (c.fields ?? []).join(', ')))))))
-              : null
-          )
-          preset?.onDone?.(r)
-          return
-        }
+        r = await request('POST', adminPath(`/imports/${st.kind}${apply ? '?apply=1' : ''}`), { json: { rows, apply }, timeout: 600000 })
+      } catch (error) {
+        busy = null
+        paintImportBtn()
+        if (alive()) fill(result, el('div', { class: 'alert alert-danger' }, error.message))
+        return null
+      }
+      busy = null
+      if (!alive()) return r
+      if (r.applied) {
+        const done = r.changes ?? []
         checked = null
-        // Problem rows red, changing rows green, in the grid itself.
-        const bad = new Map(errors.map((e) => [Number(e.line), e.message]))
-        const good = new Set((r.changes ?? []).map((c) => String(c.sku)))
-        if (hot) {
-          marks.clear()
-          data().forEach((row, i) => {
-            if (bad.has(i + 1)) marks.set(i, 'danger')
-            else if (good.has(String(row?.[keyCol()] ?? '').trim())) marks.set(i, 'success')
-          })
-          hot.render()
-        }
-        for (const tr of tableHolder.querySelectorAll('tbody tr')) {
-          const i = Number(tr.dataset.index)
-          tr.classList.toggle('danger', bad.has(i + 1))
-          tr.classList.toggle('success', !bad.has(i + 1) && good.has(String(data()[i]?.[keyCol()] ?? '').trim()))
-          tr.title = bad.get(i + 1) ?? ''
-        }
-        const unknown = r.unknown ?? []
-        const changes = r.changes ?? []
+        marks.clear()
+        st.rows[st.kind] = []
+        paintGrid()
+        paintImportBtn()
+        toast('success', `Imported ${plural(done.length, 'change')}`)
         fill(
           result,
-          errors.length
-            ? el('div', { class: 'alert alert-danger' }, `Nothing was imported: ${plural(errors.length, 'row')} ${errors.length === 1 ? 'has a problem' : 'have problems'} (red in the grid). Fix ${errors.length === 1 ? 'it' : 'them'} and press Import again.`)
-            : null,
-          kv([['Unchanged', r.unchanged ? plural(r.unchanged, 'row') : null], ['Not in the PIM', unknown.length ? unknown.map((u) => u.sku).join(', ') : null]]),
-          errors.length
-            ? el('table', { class: 'fpim-table' }, el('thead', {}, el('tr', {}, el('th', {}, 'Row'), el('th', {}, t().key), el('th', {}, 'Problem'))), el('tbody', {}, errors.map((e) => el('tr', {}, el('td', {}, e.line ?? ''), el('td', { class: 'fpim-sku' }, e.sku ?? ''), el('td', {}, e.message)))))
-            : null,
-          null
+          el('div', { class: 'alert alert-success' }, el('strong', {}, `Imported ${plural(done.length, 'change')}`), el('div', {}, 'The website picks them up within a few minutes.')),
+          done.length ? changesTable(done) : null
         )
-      } catch (error) {
-        importBtn.classList.remove('disabled')
-        if (alive()) fill(result, el('div', { class: 'alert alert-danger' }, error.message))
+        preset?.onDone?.(r)
+        return r
       }
+      // A check (or an import the PIM refused): the grid and the panel say why, and Import waits for a clean check.
+      checked = r
+      markRows(r)
+      paintImportBtn()
+      showCheck(r)
+      if ((r.errors ?? []).length) toast('danger', `${plural(r.errors.length, 'row')} need fixing — nothing was saved`)
+      return r
     }
 
     // ------------------------------------------------ the page
@@ -5466,7 +5529,9 @@
           { class: 'btns pull-right' },
           el('a', { class: 'btn btn-sm btn-info', href: '#', onclick: async (e) => { e.preventDefault(); try { saveFile(await request('GET', adminPath(`/imports/${st.kind}/template?format=xlsx`), { blob: true })) } catch (error) { fill(result, el('div', { class: 'alert alert-danger' }, error.message)) } } }, icon('fa-download'), ' Template'),
           ' ',
-          el('a', { class: 'btn btn-sm btn-default', href: '#', onclick: (e) => { e.preventDefault(); st.rows[st.kind] = []; checked = null; paintImportBtn(); fill(result); paintGrid() } }, 'Clear'),
+          el('a', { class: 'btn btn-sm btn-default', href: '#', onclick: (e) => { e.preventDefault(); st.rows[st.kind] = []; checked = null; marks.clear(); paintImportBtn(); fill(result); paintGrid() } }, 'Clear'),
+          ' ',
+          checkBtn,
           ' ',
           importBtn
         )
@@ -5483,8 +5548,8 @@
           'p',
           { style: 'margin:0' },
           st.kind === 'images'
-            ? 'One SKU per row — a parent (every part shows its pictures), a part, or a unit like FM-1-CASE — and one or more picture links, separated by commas. They are added after the pictures it has; a link already imported for that SKU is skipped. Import saves only if every row is right.'
-            : `Type or paste a ${t().key} and its row fills in with what the PIM has now — change only what you need. An empty cell changes nothing; NULL clears it. Import saves only if every row is right; a row with a problem turns red and nothing is saved.`
+            ? 'One SKU per row — a parent (every part shows its pictures), a part, or a unit like FM-1-CASE — and one or more picture links, separated by commas. They are added after the pictures it has; a link already imported for that SKU is skipped. Check first; Import saves only if every row is right.'
+            : `Typing a ${t().key} into an empty row fills in what the PIM has now, ready to edit. Only the columns you fill in change: an empty cell leaves that field as it is; NULL clears it. Imports only update — ${t().key}s not in the PIM are listed, not created. Check first: problem rows turn red and nothing is saved; Import is ready once a check passes.`
         )
       )
       paintImportBtn()
@@ -5713,17 +5778,37 @@
     ['channels', 'Google / eBay', 'fa-globe'],
   ]
 
-  function aiTool(content, alive) {
+  /**
+   * `arg` comes from the address: #pim/ai/<tab> opens that tab, and
+   * #pim/ai/pictures:<SKU>:<fileId> opens one picture in Pictures → Fix it.
+   */
+  function aiTool(content, alive, arg) {
     headerActions()
+    const link = /^([\w-]+)(?::(.+?))?(?::(\d+))?$/.exec(arg ?? '')
+    let open = null
+    if (link && AI_TABS.some(([k]) => k === link[1])) {
+      toolState.aiTab = link[1]
+      if (link[1] === 'pictures' && link[2]) open = { sku: link[2], fileId: link[3] ? Number(link[3]) : null }
+    }
     const tab = (toolState.aiTab ??= 'titles')
+    const switchTab = (k) => {
+      toolState.aiTab = k
+      // The address follows the tab, so a reload comes back to it.
+      const hash = `#pim/ai/${k}`
+      if (location.hash !== hash) history.replaceState(null, '', `${location.pathname}${location.search}${hash}`)
+      if (page?.key === 'ai') page.arg = k
+      aiTool(content, alive)
+    }
     const area = el('div', {}, spinner())
+    const models = el('span', { class: 'text-muted pull-right', style: 'margin-top:18px;font-size:12px' })
     fill(
       content,
+      models,
       el(
         'div',
         { class: 'btn-group fpim-settings-tabs', role: 'tablist' },
         AI_TABS.map(([k, label, ic]) =>
-          el('a', { href: '#', role: 'tab', 'aria-selected': String(k === tab), class: `btn ${k === tab ? 'btn-primary' : 'btn-default'}`, onclick: (e) => { e.preventDefault(); toolState.aiTab = k; aiTool(content, alive) } }, icon(ic), ` ${label}`)
+          el('a', { href: `#pim/ai/${k}`, role: 'tab', 'aria-selected': String(k === tab), class: `btn ${k === tab ? 'btn-primary' : 'btn-default'}`, onclick: (e) => { e.preventDefault(); switchTab(k) } }, icon(ic), ` ${label}`)
         )
       ),
       area
@@ -5733,10 +5818,11 @@
       try {
         ;[status, rules] = await Promise.all([request('GET', adminPath('/ai/status')), request('GET', adminPath('/ai/rules'))])
       } catch (error) {
-        return alive() && toolError(area, error, () => aiTool(content, alive))
+        return alive() && toolError(area, error, () => aiTool(content, alive, arg))
       }
       if (!alive()) return
-      const ctx = { area, alive, status, rules, again: () => aiTool(content, alive) }
+      if (status.text?.model) fill(models, `Text by ${status.text.model}${status.vision?.model ? ` · pictures checked by ${status.vision.model}` : ''}`)
+      const ctx = { area, alive, status, rules, open, again: () => aiTool(content, alive) }
       ;({ titles: aiTitles, variations: aiVariations, pictures: aiPictures, categories: aiAutocat, channels: aiCategories })[tab](ctx)
     })()
   }
@@ -5752,13 +5838,26 @@
         const r = await request('PUT', adminPath(`/ai/rules/${kind}`), { json: { text } })
         ctx.rules.rules = r.rules
         rules.value = r.rules[kind]
+        syncRules()
         toast('success', text ? 'Rules saved for everyone.' : 'Back to the default rules.')
       } catch (error) {
         toast('danger', error.message)
       }
     }
+    const undoBtn = headButton([icon('fa-undo'), ' Undo changes'], () => { rules.value = ctx.rules.rules[kind]; syncRules() }, 'btn-default')
+    const defaultBtn = headButton('Default rules', () => { if (confirm('Put back the default rules for everyone?')) void saveRules('') }, 'btn-default')
+    const saveBtn = headButton([icon('fa-check'), ' Save rules'], () => void saveRules(rules.value), 'btn-info')
+    // Undo and Save only while the rules differ from what is saved; Default only when they are not the default.
+    function syncRules() {
+      const changed = rules.value !== ctx.rules.rules[kind]
+      undoBtn.style.display = changed ? '' : 'none'
+      saveBtn.classList.toggle('disabled', !changed)
+      defaultBtn.classList.toggle('disabled', ctx.rules.defaults?.[kind] != null && ctx.rules.rules[kind] === ctx.rules.defaults[kind])
+    }
+    rules.addEventListener('input', syncRules)
+    syncRules()
     // The rules and request are folded away until asked for; Run is always in the heading.
-    const ruleTools = el('span', { style: 'display:none' }, headButton('Default rules', () => { if (confirm('Put back the default rules for everyone?')) void saveRules('') }, 'btn-default'), ' ', headButton([icon('fa-check'), ' Save rules'], () => void saveRules(rules.value), 'btn-info'))
+    const ruleTools = el('span', { style: 'display:none' }, undoBtn, ' ', defaultBtn, ' ', saveBtn)
     const promptBody = el(
       'div',
       { class: 'formRow fluid', hidden: true },
@@ -5773,7 +5872,12 @@
       fill(toggleBtn, icon(show ? 'fa-chevron-up' : 'fa-chevron-down'), show ? ' Hide prompt' : ' Show prompt')
     }, 'btn-default')
     const panel = tpPanel('Prompt', [toggleBtn, ruleTools, runBtn], promptBody)
-    return { panel, runBtn, setBusy: (busy, label) => { runBtn.classList.toggle('disabled', busy); fill(runBtn, icon(busy ? 'fa-spinner fa-spin' : 'fa-magic'), ` ${busy ? label : action}`) } }
+    return {
+      panel,
+      runBtn,
+      request: () => extra.value,
+      setBusy: (busy, label) => { runBtn.classList.toggle('disabled', busy); fill(runBtn, icon(busy ? 'fa-spinner fa-spin' : 'fa-magic'), ` ${busy ? label : action}`) },
+    }
   }
 
   /** Not set up: say which key is missing, nothing else. */
@@ -5782,12 +5886,19 @@
   /**
    * A tab's list: products that still need it (or all of them), a search box,
    * tick boxes, and each row's suggestion when there is one.
+   * `init` adds the tab's own state; `filters(s)` is shown beside the search
+   * while "Show all" is off and `body(s)` goes with the list request;
+   * `actions` sit in the list's heading; `onPaint` runs after each paint.
    */
-  function aiList(ctx, kind, { title, columns, row }) {
+  function aiList(ctx, kind, { title, columns, row, init = {}, filters, body, actions, emptyHint, highlight, onPaint }) {
     const s = (toolState[`ai-${kind}`] ??= { search: '', all: false, picked: new Set(), results: new Map() })
+    for (const [k, v] of Object.entries(init)) s[k] ??= v
     const search = el('input', { class: 'form-control', type: 'search', value: s.search, placeholder: 'SKU, title or brand' })
     const all = el('input', { type: 'checkbox' })
     all.checked = s.all
+    const filterEl = filters ? filters(s) : null
+    const syncFilters = () => { if (filterEl) filterEl.style.display = s.all ? 'none' : '' }
+    syncFilters()
     const titleEl = el('span', {}, title)
     const tools = el('span')
     const table = el('div', {}, spinner())
@@ -5797,7 +5908,7 @@
     async function load() {
       table.style.opacity = '.5'
       try {
-        items = await request('POST', adminPath(`/ai/${kind}/list`), { json: { search: s.search, all: s.all } })
+        items = await request('POST', adminPath(`/ai/${kind}/list`), { json: { ...(body?.(s) ?? {}), search: s.search, all: s.all } })
       } catch (error) {
         return ctx.alive() && toolError(table, error, load)
       }
@@ -5810,6 +5921,7 @@
       const pageBox = el('input', { type: 'checkbox', class: 'form-control', title: 'Tick all shown' })
       pageBox.checked = shown.length > 0 && shown.every((x) => s.picked.has(x.id))
       pageBox.addEventListener('change', () => { for (const x of shown) pageBox.checked ? s.picked.add(x.id) : s.picked.delete(x.id); paint() })
+      const empty = s.all || s.search ? 'Nothing matches.' : (typeof emptyHint === 'function' ? emptyHint(s) : emptyHint) ?? 'Nothing needs this. Tick “Show all” to see every product.'
       fill(
         table,
         el(
@@ -5824,201 +5936,469 @@
                   const box = el('input', { type: 'checkbox', class: 'form-control', 'aria-label': `Tick ${x.sku}` })
                   box.checked = s.picked.has(x.id)
                   box.addEventListener('change', () => { box.checked ? s.picked.add(x.id) : s.picked.delete(x.id); fill(tools, `${s.picked.size} ticked`) })
-                  return el('tr', { class: s.results.has(x.id) ? 'fpim-picked' : '' }, el('td', { class: 'fpim-tick' }, box), row(x, s.results.get(x.id)))
+                  const lit = highlight ? highlight(x, s) : s.results.has(x.id)
+                  return el('tr', { class: lit ? 'fpim-picked' : '' }, el('td', { class: 'fpim-tick' }, box), row(x, s.results.get(x.id)))
                 })
-              : el('tr', {}, el('td', { colspan: columns.length + 1, class: 'text-muted' }, s.all ? 'Nothing matches.' : 'Nothing needs this. Tick “Show all” to see every product.'))
+              : el('tr', {}, el('td', { colspan: columns.length + 1, class: 'text-muted' }, empty))
           )
         ),
-        items.length > shown.length ? el('p', { class: 'fpim-help' }, `Showing the first ${shown.length}: search to narrow it.`) : null
+        items.length > shown.length ? el('p', { class: 'fpim-help' }, `Showing the first ${shown.length} of ${items.length}: search to narrow it.`) : null
       )
       fill(tools, s.picked.size ? `${s.picked.size} ticked` : '')
+      onPaint?.()
     }
     search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { s.search = search.value.trim(); void load() }, 300) })
-    all.addEventListener('change', () => { s.all = all.checked; void load() })
+    all.addEventListener('change', () => { s.all = all.checked; syncFilters(); void load() })
     const panel = el(
       'div',
       {},
-      tpPanel('Find', null, el('div', { class: 'formRow fluid' }, field('Search', search, null, 6), el('div', { class: 'col-md-3 fpim-field' }, el('label', { style: 'font-weight:normal;margin-top:8px' }, all, ' Show all, not only those that need it')), el('div', { class: 'clear' }))),
-      el('div', { class: 'panel panel-parts fluid mt10' }, el('div', { class: 'panel-heading' }, titleEl, el('div', { class: 'btns pull-right' }, tools, refreshBtn)), el('div', { class: 'panel-body p0' }, table))
+      tpPanel('Find', null, el('div', { class: 'formRow fluid' }, field('Search', search, null, 6), el('div', { class: 'col-md-3 fpim-field' }, el('label', { style: 'font-weight:normal;margin-top:8px' }, all, ' Show all, not only those that need it')), filterEl, el('div', { class: 'clear' }))),
+      el('div', { class: 'panel panel-parts fluid mt10' }, el('div', { class: 'panel-heading' }, titleEl, el('div', { class: 'btns pull-right' }, tools, actions ?? null, refreshBtn)), el('div', { class: 'panel-body p0' }, table))
     )
     void load()
-    return { panel, state: s, repaint: () => paint(), reload: load, picked: () => items.filter((x) => s.picked.has(x.id)) }
+    return { panel, state: s, repaint: () => paint(), reload: load, items: () => items, picked: () => items.filter((x) => s.picked.has(x.id)) }
   }
 
   /** Run `work` over `list` in batches of `size`, saying how far it has got. */
   async function inBatches(list, size, setBusy, work) {
     for (let i = 0; i < list.length; i += size) {
-      setBusy(true, `Working ${Math.min(i + size, list.length)} of ${list.length}…`)
+      setBusy(true, list.length > size ? `Working… ${Math.min(i + size, list.length)} of ${list.length}` : 'Working…')
       await work(list.slice(i, i + size))
     }
   }
 
   // ---------------------------------------------------------------- parent titles
 
-  /**
-   * What the AI wrote, as the Import page's own grid: prefilled, editable, and
-   * saved only by its Import button. Shown under the tab's list.
-   */
-  function aiGrid(holder, ctx, preset) {
-    if (!preset.rows.length) return fill(holder, el('div', { class: 'alert alert-warning mt10' }, 'Nothing came back to check.'))
-    void importTool(holder, ctx.alive, preset).then(() => holder.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-  }
+  /** The title a parent has now: none while it is only the sync's stand-in. */
+  const aiSavedTitle = (x) => (x.standIn ? '' : x.label ?? '')
 
+  /**
+   * Titles are written and edited in the list itself: each row has its title
+   * box (the TradePeg stand-in shows grey), the AI button and Save; "Write
+   * titles for the ticked" fills the boxes, "Save all" saves every changed one.
+   */
   function aiTitles(ctx) {
     if (!ctx.status.text.ready) return aiNotReady(ctx, 'Writing titles')
-    const gridHolder = el('div')
+    const rowsById = new Map() // id -> what its row needs to show a new title
+    const saveAllBtn = headButton('', () => void saveAll(), 'btn-success', { title: 'Save every title that has been typed or written and not saved yet' })
     const list = aiList(ctx, 'titles', {
-      title: 'Parents without a title of their own',
-      columns: ['Parent', 'Title now', 'Its parts in TradePeg'],
-      row: (x) => [
-        el('td', { class: 'fpim-sku', style: 'white-space:nowrap' }, x.sku),
-        el(
-          'td',
-          {},
-          !x.label
-            ? el('span', { class: 'text-muted' }, 'None')
-            : x.standIn
-              ? [el('span', { class: 'label label-warning' }, 'Not written yet'), el('div', { class: 'text-muted', style: 'font-size:12px', title: 'The TradePeg sync filled this in from the parts’ titles; nobody has written a title yet' }, `Stand-in from TradePeg: ${x.label}`)]
-              : x.label
-        ),
-        el('td', { class: 'text-muted', style: 'font-size:12px' }, x.titles.slice(0, 3).map((t) => el('div', {}, t.title)), x.parts > 3 ? el('div', {}, `and ${x.parts - 3} more`) : null),
-      ],
+      title: 'Parents without a proper title',
+      init: { drafts: new Map(), writing: new Set(), saving: new Set(), savingAll: false },
+      emptyHint: 'Every parent has a title. Tick “Show all” to rewrite any of them.',
+      columns: ['Parent', 'Its parts in TradePeg', 'Title'],
+      actions: [saveAllBtn, ' '],
+      onPaint: () => paintSaveAll(),
+      row: (x) => {
+        const saved = aiSavedTitle(x)
+        const input = el('input', { class: 'form-control input-sm', value: s.drafts.get(x.id) ?? saved, placeholder: x.standIn ? x.label : 'Type a title', 'aria-label': `Title for ${x.sku}` })
+        const count = el('div', { class: 'help-block', style: 'margin:2px 0 0' })
+        const saveBtn = button([icon('fa-check'), ' Save'], () => void saveOne(x, saveBtn), 'btn-success')
+        const aiBtn = el('button', { type: 'button', class: 'btn btn-sm btn-default', style: 'color:#7c3aed', title: `Write a title for ${x.sku} with AI`, 'aria-label': `Write a title for ${x.sku} with AI`, onclick: () => void writeOne(x) })
+        const sync = () => {
+          const v = input.value
+          saveBtn.style.display = (v.trim() !== '' && v.trim() !== saved) || s.saving.has(x.id) ? '' : 'none'
+          aiBtn.disabled = s.writing.has(x.id)
+          fill(aiBtn, icon(s.writing.has(x.id) ? 'fa-spinner fa-spin' : 'fa-magic'))
+          fill(count, `${v.length} characters${x.standIn ? ' · grey text is the stand-in from TradePeg' : ''}`)
+        }
+        input.addEventListener('input', () => { s.drafts.set(x.id, input.value); sync(); paintSaveAll() })
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void saveOne(x, saveBtn) } })
+        rowsById.set(x.id, { input, sync })
+        sync()
+        return [
+          el('td', {}, el('div', { class: 'fpim-sku', style: 'white-space:nowrap' }, x.sku), el('div', { style: 'max-width:280px' }, x.label)),
+          el('td', { class: 'text-muted', style: 'font-size:12px;max-width:380px' }, (x.titles ?? []).slice(0, 3).map((t) => el('div', { title: t.title, style: 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis' }, t.title)), x.parts > 3 ? el('div', {}, `and ${x.parts - 3} more`) : null),
+          el('td', { style: 'min-width:380px' }, el('div', { style: 'display:flex;gap:6px;align-items:center' }, aiBtn, input, saveBtn), count),
+        ]
+      },
     })
+    const s = list.state
+
+    const unsaved = () => list.items().filter((x) => { const t = (s.drafts.get(x.id) ?? '').trim(); return t !== '' && t !== aiSavedTitle(x) })
+    function paintSaveAll() {
+      const n = unsaved().length
+      fill(saveAllBtn, icon(s.savingAll ? 'fa-spinner fa-spin' : 'fa-check'), ` Save all${n ? ` (${n})` : ''}`)
+      saveAllBtn.classList.toggle('disabled', !n || s.savingAll)
+    }
+    paintSaveAll()
+
+    /** A new title in a row's box, without redrawing the list. */
+    function showDraft(id) {
+      const r = rowsById.get(id)
+      if (!r?.input.isConnected) return
+      r.input.value = s.drafts.get(id) ?? r.input.value
+      r.sync()
+      r.input.closest('tr')?.classList.add('fpim-picked')
+    }
+
+    async function writeOne(x) {
+      if (s.writing.has(x.id)) return
+      s.writing.add(x.id)
+      rowsById.get(x.id)?.sync()
+      try {
+        const [r] = await request('POST', adminPath('/ai/titles/suggest'), { json: { ids: [x.id], request: prompt.request() }, timeout: 240000 })
+        if (!r?.suggestion?.trim()) toast('warning', `No title came back for ${x.sku}. Try again.`)
+        else {
+          s.drafts.set(x.id, r.suggestion)
+          s.results.set(x.id, r)
+        }
+      } catch (error) {
+        toast('danger', error.message)
+      } finally {
+        s.writing.delete(x.id)
+        showDraft(x.id)
+        paintSaveAll()
+      }
+    }
+
+    async function saveOne(x, btn) {
+      const title = (s.drafts.get(x.id) ?? '').trim()
+      if (!title || title === aiSavedTitle(x) || s.saving.has(x.id)) return
+      s.saving.add(x.id)
+      btn.disabled = true
+      fill(btn, icon('fa-spinner fa-spin'), ' Save')
+      try {
+        const r = await request('POST', adminPath('/ai/titles/apply'), { json: { items: [{ id: x.id, title }] } })
+        if (r.failed?.length) throw new Error(r.failed[0].message)
+        toast('success', `Saved the title of ${x.sku}`)
+        s.drafts.delete(x.id)
+        s.results.delete(x.id)
+        if (ctx.alive()) void list.reload()
+      } catch (error) {
+        toast('danger', error.message)
+        btn.disabled = false
+        fill(btn, icon('fa-check'), ' Save')
+      } finally {
+        s.saving.delete(x.id)
+      }
+    }
+
+    /** Every changed title at once, 50 to a request; ones that fail stay in their boxes. */
+    async function saveAll() {
+      const items = unsaved().map((x) => ({ id: x.id, sku: x.sku, title: s.drafts.get(x.id).trim() }))
+      if (!items.length || s.savingAll) return
+      s.savingAll = true
+      paintSaveAll()
+      const failed = []
+      let saved = 0
+      try {
+        for (let i = 0; i < items.length; i += 50) {
+          const batch = items.slice(i, i + 50)
+          const r = await request('POST', adminPath('/ai/titles/apply'), { json: { items: batch.map(({ id, title }) => ({ id, title })) } })
+          const bad = new Set((r.failed ?? []).map((f) => f.id))
+          saved += r.saved ?? 0
+          for (const f of r.failed ?? []) failed.push(`${batch.find((b) => b.id === f.id)?.sku ?? f.id}: ${f.message}`)
+          for (const b of batch) if (!bad.has(b.id)) { s.drafts.delete(b.id); s.results.delete(b.id) }
+        }
+      } catch (error) {
+        failed.push(error.message)
+      } finally {
+        s.savingAll = false
+        paintSaveAll()
+        if (ctx.alive()) void list.reload()
+      }
+      if (failed.length) toast('danger', `${saved ? `Saved ${plural(saved, 'title')}. ` : ''}${plural(failed.length, 'title')} not saved: ${failed.slice(0, 5).join('; ')}${failed.length > 5 ? '…' : ''}`)
+      else if (saved) toast('success', `Saved ${plural(saved, 'title')}.`)
+    }
+
     const prompt = aiPrompt(ctx, 'titles', {
       action: 'Write titles for the ticked',
       onRun: async (extra) => {
         const ids = list.picked().map((x) => x.id)
         if (!ids.length) return toast('warning', 'Tick the parents to write titles for.')
-        const results = []
         try {
           await inBatches(ids, 15, prompt.setBusy, async (batch) => {
-            results.push(...(await request('POST', adminPath('/ai/titles/suggest'), { json: { ids: batch, request: extra }, timeout: 240000 })))
+            const out = await request('POST', adminPath('/ai/titles/suggest'), { json: { ids: batch, request: extra }, timeout: 240000 })
+            for (const r of out) {
+              s.results.set(r.id, r)
+              if (r.suggestion?.trim()) s.drafts.set(r.id, r.suggestion)
+              showDraft(r.id)
+            }
+            paintSaveAll()
           })
         } catch (error) {
           toast('danger', error.message)
         } finally {
           prompt.setBusy(false)
         }
-        aiGrid(gridHolder, ctx, {
-          kind: 'products',
-          columns: ['SKU', 'Label'],
-          rows: results.filter((r) => r.suggestion).map((r) => ({ SKU: r.sku, Label: r.suggestion })),
-          title: `Suggested titles (${results.filter((r) => r.suggestion).length}) — check, change, then Import`,
-          note: 'Nothing is saved until you press Import. Change any title in the grid first; clear a row to leave that parent as it is.',
-          onDone: () => void list.reload(),
-        })
       },
     })
     headerActions()
-    fill(ctx.area, list.panel, prompt.panel, gridHolder)
+    fill(ctx.area, list.panel, prompt.panel)
   }
 
   // ---------------------------------------------------------------- variations
 
+  /**
+   * One card per parent the AI worked out: the type names (renamable, in
+   * order) and every part's values, saved or dismissed card by card. Asking
+   * again clears the cards that were not saved.
+   */
   function aiVariations(ctx) {
     if (!ctx.status.text.ready) return aiNotReady(ctx, 'Working out variations')
-    const gridHolder = el('div')
     const notes = el('div')
+    const cardsHolder = el('div')
+    const cardEls = new Map() // card -> its panel, on this page
     const list = aiList(ctx, 'variations', {
       title: 'VARPARs whose variations do not work',
+      init: { cards: [], failures: [] },
+      emptyHint: 'Every parent with several parts has its variations. Tick “Show all” to redo one.',
+      highlight: (x, s) => s.cards.some((c) => c.id === x.id),
       columns: ['Parent', 'Title', 'Parts', 'Variation types now'],
       row: (x) => [el('td', { class: 'fpim-sku' }, x.sku), el('td', {}, x.label), el('td', {}, x.parts), el('td', { class: 'text-muted' }, x.types.join(', ') || '—', (x.problems ?? []).map((m) => el('div', { class: 'text-danger' }, m)))],
     })
+    const s = list.state
+
+    function paintNotes() {
+      const noted = s.cards.filter((r) => r.note)
+      fill(
+        notes,
+        s.failures.length ? el('div', { class: 'alert alert-danger mt10' }, el('strong', {}, 'Not worked out:'), s.failures.map((f) => el('div', {}, f))) : null,
+        noted.length ? el('details', { class: 'fpim-more' }, el('summary', {}, 'What the AI noticed'), el('ul', {}, noted.map((r) => el('li', {}, el('strong', {}, r.sku), ` ${r.note}`)))) : null
+      )
+    }
+    const cardEl = (card) => {
+      if (!cardEls.has(card)) cardEls.set(card, variationCard(card))
+      return cardEls.get(card)
+    }
+    const drop = (card) => {
+      s.cards = s.cards.filter((c) => c !== card)
+      cardEls.get(card)?.remove()
+      cardEls.delete(card)
+      paintNotes()
+      list.repaint()
+    }
+
+    function variationCard(card) {
+      const warn = el('span', { style: 'color:#8a6d3b' })
+      const syncWarn = () => fill(warn, card.parts.some((p) => card.types.some((_, i) => !String(p.values[i] ?? '').trim())) ? 'Some parts have no value yet — every part needs one for each type.' : '')
+      const amber = (input) => { input.style.borderColor = input.value.trim() ? '' : '#f0ad4e' }
+      const saveBtn = headButton([icon('fa-check'), ' Save'], async () => {
+        saveBtn.classList.add('disabled')
+        fill(saveBtn, icon('fa-spinner fa-spin'), ' Save')
+        try {
+          await request('POST', adminPath('/ai/variations/apply'), { json: { id: card.id, types: card.types, parts: card.parts.map((p) => ({ id: p.id, values: p.values })) } })
+          toast('success', `Saved the variations of ${card.sku}`)
+          // New variation names are on the list now: the Import page reads it again.
+          if (card.newTypes?.length) delete toolState.importOptions?.variations
+          drop(card)
+          if (ctx.alive()) void list.reload()
+        } catch (error) {
+          toast('danger', error.message)
+          saveBtn.classList.remove('disabled')
+          fill(saveBtn, icon('fa-check'), ' Save')
+        }
+      }, 'btn-success')
+      const dismiss = headButton([icon('fa-times'), ' Dismiss'], () => drop(card), 'btn-default')
+      const typeHeads = card.types.map((t, i) => {
+        const input = el('input', { class: 'form-control input-sm', value: t, style: 'font-weight:bold;min-width:130px', 'aria-label': `Variation type ${i + 1}` })
+        input.addEventListener('input', () => { card.types[i] = input.value })
+        return el('th', { class: 'no-sort' }, input)
+      })
+      const rows = card.parts.map((p) =>
+        el(
+          'tr',
+          {},
+          el('td', { class: 'fpim-sku', style: 'white-space:nowrap' }, p.sku),
+          el('td', { class: 'text-muted', title: p.title, style: 'max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis' }, p.title),
+          card.types.map((t, i) => {
+            const input = el('input', { class: 'form-control input-sm', value: p.values[i] ?? '', 'aria-label': `${t} of ${p.sku}` })
+            amber(input)
+            input.addEventListener('input', () => { p.values[i] = input.value; amber(input); syncWarn() })
+            return el('td', {}, input)
+          })
+        )
+      )
+      syncWarn()
+      return tpPanel(
+        [el('span', { class: 'fpim-sku' }, card.sku), ` — ${card.label ?? ''}`],
+        [dismiss, saveBtn],
+        el(
+          'div',
+          { class: 'formRow fluid' },
+          el(
+            'div',
+            { class: 'col-md-12', style: 'display:flex;flex-wrap:wrap;gap:4px 24px' },
+            card.current?.types?.length ? el('span', { class: 'text-muted' }, `Now: ${card.current.types.join(', ')}`) : null,
+            card.newTypes?.length ? el('span', { class: 'text-info' }, `New to the list on save: ${card.newTypes.join(', ')}`) : null,
+            warn
+          ),
+          el('div', { class: 'clear' })
+        ),
+        el('div', { class: 'table-responsive' }, el('table', { class: 'table-grid table-bordered fpim-grid-table' }, el('thead', {}, el('tr', {}, el('th', { class: 'no-sort' }, 'Part'), el('th', { class: 'no-sort' }, 'TradePeg title'), typeHeads)), el('tbody', {}, rows)))
+      )
+    }
+
     const prompt = aiPrompt(ctx, 'variations', {
       action: 'Suggest variations for the ticked',
       onRun: async (extra) => {
         const picked = list.picked()
         if (!picked.length) return toast('warning', 'Tick the VARPARs to work out.')
-        const results = []
-        const failed = []
+        // Asking again drops the suggestions that were not saved.
+        s.cards = []
+        s.failures = []
+        cardEls.clear()
+        fill(cardsHolder)
+        paintNotes()
         try {
+          // One parent to a request.
           await inBatches(picked, 1, prompt.setBusy, async ([x]) => {
             try {
-              results.push(await request('POST', adminPath('/ai/variations/suggest'), { json: { id: x.id, request: extra }, timeout: 240000 }))
+              const r = await request('POST', adminPath('/ai/variations/suggest'), { json: { id: x.id, request: extra }, timeout: 240000 })
+              const old = s.cards.find((c) => c.id === r.id)
+              if (old) drop(old)
+              s.cards.push(r)
+              if (ctx.alive()) cardsHolder.append(cardEl(r))
             } catch (error) {
-              failed.push(`${x.sku}: ${error.message}`)
+              s.failures.push(`${x.sku}: ${error.message}`)
+            }
+            if (ctx.alive()) {
+              paintNotes()
+              list.repaint()
             }
           })
-          // New variation names go on the list first, or the import would refuse them.
-          const added = [...new Set(results.flatMap((r) => r.newTypes))]
-          for (const name of added) await request('POST', adminPath('/variation-types'), { json: { name } }).catch(() => {})
-          if (added.length) delete toolState.importOptions?.variations
-          fill(
-            notes,
-            added.length ? el('div', { class: 'alert alert-info mt10' }, `New variation types added to the list: ${added.join(', ')}.`) : null,
-            failed.length ? el('div', { class: 'alert alert-danger mt10' }, `Not worked out: ${failed.join('; ')}`) : null,
-            results.filter((r) => r.note).length ? el('details', { class: 'fpim-more' }, el('summary', {}, 'What the AI noticed'), el('ul', {}, results.filter((r) => r.note).map((r) => el('li', {}, el('strong', {}, r.sku), ` ${r.note}`)))) : null
-          )
         } finally {
           prompt.setBusy(false)
         }
-        // One row per part: its variation names and values, in order.
-        const rows = results.flatMap((r) => r.parts.map((p) => Object.fromEntries([['SKU', p.sku], ...r.types.flatMap((t, i) => [[`Variation ${i + 1} Name`, t], [`Variation ${i + 1} Value`, p.values[i] ?? '']])])))
-        aiGrid(gridHolder, ctx, {
-          kind: 'variations',
-          rows,
-          title: `Suggested variations (${plural(results.length, 'parent')}, ${plural(rows.length, 'part')}) — check, change, then Import`,
-          note: 'One row per part. Nothing is saved until you press Import. Every part of a parent needs the same names in the same order.',
-          onDone: () => void list.reload(),
-        })
       },
     })
     headerActions()
-    fill(ctx.area, list.panel, prompt.panel, notes, gridHolder)
+    fill(ctx.area, list.panel, prompt.panel, notes, cardsHolder)
+    fill(cardsHolder, s.cards.map(cardEl))
+    paintNotes()
   }
 
-  // ---------------------------------------------------------------- categories
+  // ---------------------------------------------------------------- Google / eBay
 
+  const AI_CHANNELS = [['website', 'Website'], ['google', 'Google Shopping'], ['ebay', 'eBay']]
+  const aiLeaf = (path, levels = 2) => String(path).split(' > ').slice(-levels).join(' > ')
+
+  /**
+   * Categories for the website, Google Shopping and eBay: the AI's suggestions
+   * show in each row as tick boxes (sure ones, 70% and up, start ticked);
+   * "Save the ticked suggestions" saves them. Website categories are added to
+   * what a product has; Google and eBay replace theirs.
+   */
   function aiCategories(ctx) {
     if (!ctx.status.text.ready) return aiNotReady(ctx, 'Suggesting categories')
-    const gridHolder = el('div')
+    let saving = false
+    const saveBtn = headButton('', () => void save(), 'btn-success')
+    const paintSave = () => {
+      fill(saveBtn, icon(saving ? 'fa-spinner fa-spin' : 'fa-check'), ' Save the ticked suggestions')
+      saveBtn.classList.toggle('disabled', saving || !toSave().length)
+    }
     const list = aiList(ctx, 'categories', {
       title: 'Products missing a category',
+      init: { missing: AI_CHANNELS.map(([k]) => k), take: new Set() },
+      body: (s) => ({ missing: s.missing }),
+      emptyHint: (s) => (s.missing.length ? 'Every product has its categories. Tick “Show all” to check any of them.' : 'Tick Website, Google Shopping or eBay to see what is missing there.'),
+      filters: (s) =>
+        el(
+          'div',
+          { class: 'col-md-3 fpim-field' },
+          el(
+            'div',
+            { style: 'margin-top:8px' },
+            AI_CHANNELS.map(([k, label]) => {
+              const box = el('input', { type: 'checkbox' })
+              box.checked = s.missing.includes(k)
+              box.addEventListener('change', () => {
+                s.missing = AI_CHANNELS.map(([id]) => id).filter((id) => (id === k ? box.checked : s.missing.includes(id)))
+                void list.reload()
+              })
+              return el('label', { style: 'font-weight:normal;margin-right:12px' }, box, ` ${label}`)
+            })
+          ),
+          el('div', { class: 'help-block' }, 'Missing on')
+        ),
       columns: ['Product', 'Website', 'Google', 'eBay'],
-      row: (x) => {
-        const now = (v) => el('div', { class: 'text-muted', style: 'font-size:12px' }, v || 'None yet')
+      actions: [saveBtn, ' '],
+      onPaint: () => paintSave(),
+      row: (x, r) => {
+        const now = (v) => el('div', { class: 'text-muted', style: 'font-size:12px' }, v ? `Now: ${v}` : 'None yet')
         return [
           el('td', {}, el('div', { class: 'fpim-sku' }, x.sku), x.label),
-          el('td', {}, now(x.categories.map((c) => c.split(' > ').at(-1)).join(', '))),
-          el('td', {}, now(x.google?.split(' > ').at(-1))),
-          el('td', {}, now(x.ebay?.split(' > ').at(-1))),
+          el('td', { style: 'min-width:220px' }, now((x.categories ?? []).map((c) => aiLeaf(c, 1)).join(', ')), r?.website.map((c) => choice(r, 'web', c)), r && !r.website.length ? el('div', { class: 'text-muted', style: 'font-size:12px' }, 'No suggestion') : null),
+          el('td', { style: 'min-width:190px' }, now(x.google && aiLeaf(x.google, 1)), r?.google ? choice(r, 'google', r.google) : null),
+          el('td', { style: 'min-width:190px' }, now(x.ebay && aiLeaf(x.ebay, 1)), r?.ebay ? choice(r, 'ebay', r.ebay) : null, r?.note ? el('div', { class: 'text-muted', style: 'font-size:12px;font-style:italic;margin-top:4px' }, r.note) : null),
         ]
       },
     })
+    const s = list.state
+
+    /** One suggestion: its tick box, the last two levels of its path, and how sure the AI is. */
+    function choice(r, where, c) {
+      const key = `${r.id}:${where}:${c.id}`
+      const box = el('input', { type: 'checkbox', style: 'margin:2px 6px 0 0' })
+      box.checked = s.take.has(key)
+      box.addEventListener('change', () => { box.checked ? s.take.add(key) : s.take.delete(key); paintSave() })
+      const sure = c.confidence >= 0.7
+      return el(
+        'label',
+        { title: c.path, style: 'display:flex;align-items:flex-start;font-weight:normal;margin:2px 0;cursor:pointer' },
+        box,
+        el('span', {}, aiLeaf(c.path), ' ', el('span', { style: `font-size:12px;${sure ? 'color:#4e7d15;font-weight:bold' : 'color:#777'}` }, `${Math.round(c.confidence * 100)}%`))
+      )
+    }
+
+    const toSave = () =>
+      [...s.results.values()]
+        .map((r) => ({
+          id: r.id,
+          add: r.website.filter((c) => s.take.has(`${r.id}:web:${c.id}`)).map((c) => c.id),
+          google: r.google && s.take.has(`${r.id}:google:${r.google.id}`) ? r.google.id : null,
+          ebay: r.ebay && s.take.has(`${r.id}:ebay:${r.ebay.id}`) ? r.ebay.id : null,
+        }))
+        .filter((x) => x.add.length || x.google || x.ebay)
+    paintSave()
+
+    async function save() {
+      const items = toSave()
+      if (!items.length || saving) return
+      if (!confirm(`Save categories on ${plural(items.length, 'product')}? Website categories are added to what each has.`)) return
+      saving = true
+      paintSave()
+      try {
+        const r = await request('POST', adminPath('/ai/categories/apply'), { json: { items } })
+        const failed = r.failed ?? []
+        toast(failed.length ? 'warning' : 'success', `Saved ${plural(r.saved ?? 0, 'product')}${failed.length ? `, ${failed.length} failed: ${failed.slice(0, 3).map((f) => f.message).join('; ')}` : ''}`)
+        const bad = new Set(failed.map((f) => f.id))
+        for (const it of items) if (!bad.has(it.id)) s.results.delete(it.id)
+        if (ctx.alive()) void list.reload()
+      } catch (error) {
+        toast('danger', error.message)
+      } finally {
+        saving = false
+        paintSave()
+      }
+    }
+
     const prompt = aiPrompt(ctx, 'categories', {
       action: 'Suggest categories for the ticked',
       onRun: async (extra) => {
         const ids = list.picked().map((x) => x.id)
         if (!ids.length) return toast('warning', 'Tick the products to find categories for.')
-        const results = []
         try {
           await inBatches(ids, 5, prompt.setBusy, async (batch) => {
-            results.push(...(await request('POST', adminPath('/ai/categories/suggest'), { json: { ids: batch, request: extra }, timeout: 300000 })))
+            const out = await request('POST', adminPath('/ai/categories/suggest'), { json: { ids: batch, request: extra }, timeout: 300000 })
+            // Sure suggestions start ticked; the rest are offered.
+            for (const r of out) {
+              s.results.set(r.id, r)
+              for (const c of r.website) if (c.confidence >= 0.7) s.take.add(`${r.id}:web:${c.id}`)
+              if (r.google?.confidence >= 0.7) s.take.add(`${r.id}:google:${r.google.id}`)
+              if (r.ebay?.confidence >= 0.7) s.take.add(`${r.id}:ebay:${r.ebay.id}`)
+            }
+            if (ctx.alive()) list.repaint()
           })
         } catch (error) {
           toast('danger', error.message)
         } finally {
           prompt.setBusy(false)
         }
-        // Website categories are added to what each has; Google and eBay only where one was found.
-        const rows = results.map((r) => ({
-          SKU: r.sku,
-          Categories: [...new Set([...r.current.categories, ...r.website.map((c) => c.path)])].join('\n'),
-          'Google Category': r.google?.path ?? '',
-          'eBay Category': r.ebay?.path ?? '',
-        }))
-        aiGrid(gridHolder, ctx, {
-          kind: 'products',
-          columns: ['SKU', 'Categories', 'Google Category', 'eBay Category'],
-          rows,
-          title: `Suggested categories (${rows.length}) — check, change, then Import`,
-          note: 'Website categories are what each product has now plus the suggestions. An empty Google or eBay cell leaves it as it is. Nothing is saved until you press Import.',
-          onDone: () => void list.reload(),
-        })
       },
     })
     headerActions()
-    fill(ctx.area, list.panel, prompt.panel, gridHolder)
+    fill(ctx.area, list.panel, prompt.panel)
   }
 
   // ---------------------------------------------------------------- auto categories
@@ -6334,7 +6714,7 @@
     }
 
     function paintResult(out) {
-      const back = { white: '#fff', blue: '#086bc4' }
+      const back = { white: '#fff', blue: '#086bc4', checker: 'repeating-conic-gradient(#e5e7eb 0 25%, #fff 0 50%) 0 0 / 16px 16px' }
       let bg = 'white'
       const boxes = el('div', { class: 'fpim-compare' })
       const paint = () =>
@@ -6358,9 +6738,9 @@
       }
       fill(
         out,
-        el('div', { class: 'fpim-row', style: 'margin:10px 0' }, el('span', { class: 'help-block', style: 'margin:0' }, 'Check it on:'), button('White', () => { bg = 'white'; paint() }), button('Blue', () => { bg = 'blue'; paint() })),
+        el('div', { class: 'fpim-row', style: 'margin:10px 0' }, el('span', { class: 'help-block', style: 'margin:0' }, 'Check it on:'), button('White', () => { bg = 'white'; paint() }), button('Blue', () => { bg = 'blue'; paint() }), button('Transparent', () => { bg = 'checker'; paint() }, 'btn-default', { title: 'A checker shows where the picture is see-through' })),
         boxes,
-        el('div', { class: 'fpim-row' }, button([icon('fa-check'), ' Looks good — use it instead'], use('replace'), 'btn-success'), button([icon('fa-plus'), ' Add it as another picture'], use('add'), 'btn-primary'), button('Not right', () => { result = null; fill(out) }))
+        el('div', { class: 'fpim-row' }, button([icon('fa-check'), ' Looks good — use it instead'], use('replace'), 'btn-success'), button([icon('fa-plus'), ' Add it as another picture'], use('add'), 'btn-primary'), button([icon('fa-times'), ' Discard'], () => { result = null; fill(out) }))
       )
     }
 
@@ -6540,7 +6920,12 @@
       work
     )
     void paintCheck()
-    if (s.sku) void load()
+    // A link to one picture (#pim/ai/pictures:<SKU>:<fileId>) finds its product and opens it in Fix it.
+    if (ctx.open) {
+      find.value = ctx.open.sku
+      if (ctx.open.fileId) void fixOne({ sku: ctx.open.sku, fileId: ctx.open.fileId })
+      else void load()
+    } else if (s.sku) void load()
   }
 
   // ---------------------------------------------------------------- crop (free, no AI)
