@@ -4730,8 +4730,10 @@
     const s = Math.abs(seconds)
     if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min`
     if (s < 2 * 86400) {
-      const h = Math.floor(s / 3600)
-      const m = Math.round((s % 3600) / 60)
+      // Whole minutes first, so 19 h 59.6 min reads 20 h, not 19 h 60 min.
+      const mins = Math.round(s / 60)
+      const h = Math.floor(mins / 60)
+      const m = mins % 60
       return `${h} h${m ? ` ${m} min` : ''}`
     }
     return `${Math.round(s / 86400)} days`
