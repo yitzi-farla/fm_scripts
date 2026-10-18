@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.15.0
+// @version      3.16.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -28,11 +28,14 @@
  * front end inside TradePeg, so nobody needs to open Strapi:
  *
  *   A PIM section in TradePeg's menu, its pages drawn like TradePeg's own:
- *   Parents (search, filters, columns chosen per user, tick and bulk edit,
- *   Refresh = resync with TradePeg), Categories (name and slug), Import (incl.
- *   pictures from links), AI (parent titles, variations, pictures, categories),
- *   TradePeg sync, Issues, Export, Channels, Settings (incl. product fields
- *   added without code). A parent opens at
+ *   Overview (counts, what is missing most, least complete), Parents (search,
+ *   filters, work queues, columns chosen per user, tick and bulk edit, Refresh
+ *   = resync with TradePeg), Categories (name and slug), Brands, Import (Check,
+ *   then Import; incl. pictures from links), AI (parent titles, variations,
+ *   pictures, Google / eBay and auto categories), Publish (Push to website),
+ *   Settings (channels, backups, product fields added without code, TradePeg
+ *   sync with its issues, Export). The same as Farla Tools → Products (PIM),
+ *   drawn TradePeg's way; keep the two in step. A parent opens at
  *   #pim/parent/<VARPAR>: its title, status, brand, description, key features,
  *   specs, what's in the box, its pictures (one set for the whole range),
  *   videos, documents, categories, tags, website / Google / eBay, variation
