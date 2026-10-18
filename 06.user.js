@@ -1839,6 +1839,12 @@
     return pushes
   }
   const pushBadge = (n) => (n ? el('span', { class: 'badge fpim-push-badge' }, String(n)) : null)
+  function paintPushButton(b) {
+    const n = pushes?.waiting?.length ?? 0
+    fill(b, icon(pushes?.sending ? 'fa-spinner fa-spin' : 'fa-cloud-upload'), ' Push to website', pushBadge(n))
+    b.className = `btn ${n ? 'btn-warning' : 'btn-default'}`
+    b.title = n ? `${plural(n, 'change')} not on the website yet` : 'Everything is on the website'
+  }
   function paintPushCounts() {
     const n = pushes?.waiting?.length ?? 0
     for (const b of [...pushButtons]) {
@@ -1846,9 +1852,7 @@
         pushButtons.delete(b)
         continue
       }
-      fill(b, icon(pushes?.sending ? 'fa-spinner fa-spin' : 'fa-cloud-upload'), ' Push to website', pushBadge(n))
-      b.className = `btn ${n ? 'btn-warning' : 'btn-default'}`
-      b.title = n ? `${plural(n, 'change')} not on the website yet` : 'Everything is on the website'
+      paintPushButton(b)
     }
     for (const a of document.querySelectorAll('li.fpim-menu-publish > a, .fpim-menu-button a[href="#pim/publish"]')) {
       const ic = a.querySelector('i.fa')
@@ -1857,8 +1861,9 @@
   }
   function pushButton() {
     const b = el('a', { href: '#', role: 'button', onclick: (e) => { e.preventDefault(); pushDialog() } })
+    // Drawn now: it is not on the page yet, so paintPushCounts would drop it unpainted.
     pushButtons.add(b)
-    paintPushCounts()
+    paintPushButton(b)
     return b
   }
   setInterval(() => { if (document.visibilityState === 'visible') void readPushes() }, 20000)
@@ -3600,7 +3605,7 @@
           'div',
           { class: 'fpim-selbar', role: 'toolbar', 'aria-label': 'Change the ticked parents' },
           el('strong', {}, `${plural(count, 'parent')} ticked`),
-          f.all ? f.picked.size > 0 : result.total > f.picked.size
+          (f.all ? f.picked.size > 0 : result.total > f.picked.size)
             ? button(`Tick all ${result.total} that match`, () => {
                 f.all = true
                 f.picked.clear()
@@ -4772,7 +4777,7 @@
       fill(output, el('div', { class: 'alert alert-info' }, icon('fa-spinner fa-spin'), ' Sending everything…'))
       try {
         const r = await request('POST', adminPath('/reindex'), { timeout: 600000 })
-        if (alive()) fill(output, el('div', { class: 'alert alert-success' }, 'Sent. ', r?.count != null ? `${r.count} products.` : ''))
+        if (alive()) fill(output, el('div', { class: 'alert alert-success' }, 'Sent. ', r?.pushed != null ? `${r.pushed} products.` : ''))
       } catch (error) {
         if (alive()) fill(output, el('div', { class: 'alert alert-danger' }, error.message))
       }
