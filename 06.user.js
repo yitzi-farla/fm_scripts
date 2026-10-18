@@ -1764,6 +1764,8 @@
         pricingRoute = false
         return null
       }
+      // A token without Pim → admin cannot ask; the PIM still checks prices itself when Ready is saved.
+      if (error.status === 401 || error.status === 403) return null
       throw error
     }
   }
@@ -2626,7 +2628,7 @@
     } catch (error) {
       if (!alive()) return
       const box = el('div', { class: 'fpim-ovbox' })
-      toolError(box, error, () => overviewTool(content, alive))
+      toolError(box, error, () => { clearInterval(timer); overviewTool(content, alive) })
       fill(kpis, box)
       for (const x of [missing, listed, worst]) fill(x)
       return
@@ -4956,6 +4958,7 @@
     const tableHolder = el('div', { class: 'fpim-sheet' })
     const note = el('div')
     let busy = null // 'check' | 'import' while the PIM works on the rows
+    let edits = 0 // counts grid edits, so a check answered after an edit is not taken as current
     const checkBtn = el('a', { class: 'btn btn-sm btn-info', href: '#', title: 'See what would change; nothing is saved', onclick: (e) => { e.preventDefault(); if (!checkBtn.classList.contains('disabled')) void go(false) } })
     const importBtn = el('a', { class: 'btn btn-sm btn-success', href: '#', onclick: (e) => { e.preventDefault(); if (!importBtn.classList.contains('disabled')) void go(true) } })
     /** Import is ready only after a check that passed with changes, while the grid is as it was checked. */
@@ -4970,6 +4973,7 @@
     }
     /** Any edit makes the last check out of date: its result goes, and Import needs a new Check. */
     const changedGrid = () => {
+      edits++
       if (!checked) return
       checked = null
       paintImportBtn()
@@ -5325,6 +5329,7 @@
         if (!alive()) return
         const unknown = []
         const moved = []
+        let touched = false
         for (const i of indexes) {
           const r = data()[i]
           const k = String(r?.[key] ?? '').trim()
@@ -5335,11 +5340,20 @@
           if (now[key] && now[key] !== k) {
             moved.push(`${k} → ${now[key]}`)
             r[key] = now[key]
+            touched = true
           }
-          for (const c of cols()) if (c.kind === 'readonly' || !String(r[c.header] ?? '').trim()) r[c.header] = normal(c, now[c.header] ?? '')
+          for (const c of cols()) {
+            if (c.kind !== 'readonly' && String(r[c.header] ?? '').trim()) continue
+            const v = normal(c, now[c.header] ?? '')
+            if ((r[c.header] ?? '') !== v) touched = true
+            r[c.header] = v
+          }
         }
+        // Rows filled in after a check make that check out of date.
+        if (touched) changedGrid()
         paintGrid()
-        fill(
+        // A check answered meanwhile keeps its result on screen unless there is something to say.
+        if (moved.length || unknown.length || !checked) fill(
           result,
           moved.length ? el('div', { class: 'alert alert-info' }, `Parts swapped for their parent (this import edits parents): ${moved.join(', ')}.`) : null,
           unknown.length ? el('div', { class: 'alert alert-warning' }, `Not in the PIM: ${unknown.join(', ')}. Those rows will be left out.`) : null
@@ -5474,6 +5488,7 @@
       busy = apply ? 'import' : 'check'
       paintImportBtn()
       fill(result, spinner(apply ? ' Importing…' : ' Checking…'))
+      const asOf = edits
       let r
       try {
         r = await request('POST', adminPath(`/imports/${st.kind}${apply ? '?apply=1' : ''}`), { json: { rows, apply }, timeout: 600000 })
@@ -5502,6 +5517,13 @@
         return r
       }
       // A check (or an import the PIM refused): the grid and the panel say why, and Import waits for a clean check.
+      // The grid was edited (or the import type changed) while the PIM checked: that check is out of date.
+      if (edits !== asOf) {
+        checked = null
+        paintImportBtn()
+        fill(result, el('div', { class: 'alert alert-warning' }, 'The rows changed while they were being checked. Press Check again.'))
+        return r
+      }
       checked = r
       markRows(r)
       paintImportBtn()
@@ -5516,6 +5538,8 @@
     kindSelect.addEventListener('change', () => {
       st.kind = kindSelect.value
       checked = null
+      edits++
+      marks.clear()
       fill(result)
       paint()
     })
@@ -6183,7 +6207,10 @@
           await request('POST', adminPath('/ai/variations/apply'), { json: { id: card.id, types: card.types, parts: card.parts.map((p) => ({ id: p.id, values: p.values })) } })
           toast('success', `Saved the variations of ${card.sku}`)
           // New variation names are on the list now: the Import page reads it again.
-          if (card.newTypes?.length) delete toolState.importOptions?.variations
+          if (card.newTypes?.length) {
+            delete toolState.import?.options?.variations
+            delete toolState.importOptions?.variations
+          }
           drop(card)
           if (ctx.alive()) void list.reload()
         } catch (error) {
