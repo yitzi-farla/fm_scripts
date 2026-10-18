@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.16.0
+// @version      3.16.1
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -540,7 +540,11 @@
       ),
       button('Save', () => {
         GM_setValue(URL_KEY, url.value.trim() || DEFAULT_PIM_URL)
-        if (token.value.trim()) GM_setValue(TOKEN_KEY, token.value.trim())
+        if (token.value.trim()) {
+          GM_setValue(TOKEN_KEY, token.value.trim())
+          // A new token may be allowed to save: the editor is no longer locked by the old one's 403.
+          state.readOnly = false
+        }
         onSaved()
       }, 'btn-primary'),
       onBack ? el('span', {}, ' ', button('Cancel', onBack)) : null
@@ -923,6 +927,9 @@
 
     const close = () => { list.style.display = 'none' }
     const choose = (item) => {
+      // A search still on its way would open the list again over what comes next.
+      clearTimeout(timer)
+      asked++
       input.value = ''
       close()
       onPick(item)
@@ -3271,6 +3278,8 @@
         f.savedId = saved.id
         toast('success', `Saved the queue “${saved.name}”.`)
         await loadQueues()
+        // "Save as a queue" becomes "Delete this queue".
+        if (alive() && result) paintFacets()
       } catch (error) {
         toast('danger', error.message)
       }
@@ -3282,6 +3291,7 @@
         await request('DELETE', adminPath(`/filters/${encodeURIComponent(q.id)}`))
         f.savedId = null
         await loadQueues()
+        if (alive() && result) paintFacets()
       } catch (error) {
         toast('danger', error.message)
       }
@@ -4307,7 +4317,10 @@
     const channels = el('div')
     const save = () => {
       GM_setValue(URL_KEY, url.value.trim() || DEFAULT_PIM_URL)
-      if (token.value.trim()) GM_setValue(TOKEN_KEY, token.value.trim())
+      if (token.value.trim()) {
+        GM_setValue(TOKEN_KEY, token.value.trim())
+        state.readOnly = false
+      }
       token.value = ''
       renderPage('settings')
       toast('success', 'Saved.')
@@ -6885,7 +6898,12 @@
                       }),
                       ' ',
                       button('It’s fine', async () => {
-                        await request('POST', adminPath('/ai/picture-queue/dismiss'), { json: { fileIds: [q.fileId] } }).catch((e) => toast('danger', e.message))
+                        try {
+                          await request('POST', adminPath('/ai/picture-queue/dismiss'), { json: { fileIds: [q.fileId] } })
+                        } catch (e) {
+                          // Not dismissed: the row stays, so it is not lost from the list.
+                          return toast('danger', e.message)
+                        }
                         q.row.remove()
                       })
                     )
