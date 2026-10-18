@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.16.1
+// @version      3.16.2
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -103,6 +103,11 @@
     .fpim .fpim-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 16px; }
     .fpim .fpim-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
     .fpim .fpim-row > .form-control, .fpim .fpim-row > .fpim-grow { flex: 1; }
+    /* Status beside its pricing badge: the box keeps room for "Ready", the badge goes under it when narrow. */
+    .fpim .fpim-statusrow { flex-wrap: wrap; row-gap: 4px; }
+    .fpim .fpim-statusrow > select.form-control { flex: 1 0 90px; min-width: 90px; }
+    .fpim .fpim-statusrow > span:empty { display: none; }
+    .fpim .fpim-statusrow .fpim-priced { margin-left: 0; }
     .fpim .fpim-narrow { flex: 0 0 80px !important; }
     .fpim .fpim-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
     .fpim .fpim-chip { background: #eef3f8; border: 1px solid #c9d8e8; padding: 2px 4px 2px 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
@@ -1308,7 +1313,7 @@
     }
     state.paintStatus = paintStatus
     paintStatus()
-    const statusField = el('div', { class: 'col-md-2 fpim-field' }, el('div', { class: 'fpim-row', style: 'margin:0' }, status, badge), statusLabel, statusNote)
+    const statusField = el('div', { class: 'col-md-2 fpim-field' }, el('div', { class: 'fpim-row fpim-statusrow', style: 'margin:0' }, status, badge), statusLabel, statusNote)
 
     // Website title, with an AI suggestion from the parts' TradePeg titles (put in the box, not saved).
     const title = text(d, 'label', { placeholder: 'What the website calls this product' })
@@ -3214,6 +3219,18 @@
       } catch { /* no badges, then */ }
     }
     let openFacet = null
+    // An open filter list closes on a click anywhere else, or on Escape, as a dropdown does.
+    const closeFacets = (e) => {
+      if (!alive()) {
+        document.removeEventListener('mousedown', closeFacets, true)
+        document.removeEventListener('keydown', closeFacets, true)
+        return
+      }
+      if (e.type === 'keydown' && e.key !== 'Escape') return
+      for (const d of content.querySelectorAll('.fpim-facet[open]')) if (e.type === 'keydown' || !d.contains(e.target)) d.open = false
+    }
+    document.addEventListener('mousedown', closeFacets, true)
+    document.addEventListener('keydown', closeFacets, true)
     const facetFind = {} // what is typed in each filter's find box
     let timer = null
     let asked = 0
