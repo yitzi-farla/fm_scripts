@@ -637,6 +637,20 @@
     event.returnValue = ''
   })
 
+  // Ctrl/Cmd+S saves the open parent, as in Farla Tools (not inside TradePeg's grid: it has its own keys).
+  window.addEventListener(
+    'keydown',
+    (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key?.toLowerCase() !== 's') return
+      if (!state.draft || state.readOnly || !body?.isConnected) return
+      if (event.target.closest?.('.handsontable, .handsontableInputHolder, .htAutocomplete')) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (isDirty() && !state.saving) void save()
+    },
+    true
+  )
+
   let pane = null
   /** Where the editor draws: the parent's PIM page. */
   let body = null
@@ -675,6 +689,7 @@
       if (mine !== state.generation) return
       setData(data)
       render()
+      void checkPricing()
     } catch (error) {
       if (mine !== state.generation) return
       if (error.status === 401 || error.status === 403) return showSettings('The PIM refused the token. Paste a new one.')
@@ -855,8 +870,14 @@
     return el('div', { class: `col-md-${cols} fpim-field` }, top ? name : null, control, top ? null : name)
   }
 
-  function readOnly(label, value, help) {
-    return field(label, el('div', { class: 'fpim-ro' }, value ?? el('span', { class: 'text-muted' }, '—'), el('span', { class: 'label label-default' }, 'From TradePeg')), help)
+  /** A value from TradePeg, shown as TradePeg shows its own read-only fields: changed there, not here. */
+  function readOnly(label, value, help, cols = 12) {
+    return field(
+      label,
+      el('div', { class: 'form-control fpim-ro-box', title: 'From TradePeg — change it there' }, el('span', {}, value ?? '—'), icon('fa-lock text-muted')),
+      help ?? 'From TradePeg',
+      cols
+    )
   }
 
   function text(obj, key, { multiline = false, rows = 3, placeholder, max } = {}) {
@@ -1236,7 +1257,7 @@
       stat(
         'fpim-grow',
         p.missing.length
-          ? p.missing.map((m, i) => [i ? ' · ' : '', FIX_IN[m] ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); jump(m) }, title: `Go to ${FIX_IN[m]}` }, m) : el('span', { class: 'text-muted', title: 'Set in TradePeg' }, `${m} (TradePeg)`)])
+          ? p.missing.map((m, i) => [i ? ' · ' : '', FIX_IN[m] ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); jump(m) }, title: `Go to ${FIX_IN[m]}` }, m) : el('span', { class: 'text-muted', title: 'Fixed in TradePeg' }, `${m} (TradePeg)`)])
           : el('span', { class: 'text-success' }, icon('fa-check'), ' Nothing'),
         'Still to do'
       ),
@@ -1253,12 +1274,54 @@
 
   function productSection() {
     const d = state.draft
-    const status = el('select', { class: 'form-control', disabled: state.readOnly }, el('option', { value: 'draft' }, 'Draft'), el('option', { value: 'ready' }, 'Ready'))
+    const p = state.data.product
+    // Status: Ready is greyed out while the parent cannot be Ready (variants, prices), the reason underneath.
+    const readyOption = el('option', { value: 'ready' }, 'Ready')
+    const status = el('select', { class: 'form-control', disabled: state.readOnly }, el('option', { value: 'draft' }, 'Draft'), readyOption)
     status.value = d.status
     status.addEventListener('change', () => {
       d.status = status.value
       changed()
     })
+    const badge = el('span')
+    const statusLabel = el('div', { class: 'help-block' }, 'Status')
+    const statusNote = el('div', { class: 'fpim-help text-warning fpim-ready-note' })
+    const paintStatus = () => {
+      if (!status.isConnected && state.paintStatus !== paintStatus) return
+      const block = readyBlock()
+      readyOption.disabled = Boolean(block) && d.status !== 'ready'
+      const hint = block && d.status !== 'ready' ? block : 'Ready sends it to Google and eBay'
+      status.title = statusLabel.title = hint
+      fill(statusNote, block && d.status !== 'ready' ? block : null)
+      const pr = state.pricing?.sku === p.sku ? state.pricing : null
+      fill(badge, pr?.state === 'ok' ? pricingBadge(pr.units, pr.priced) : null)
+    }
+    state.paintStatus = paintStatus
+    paintStatus()
+    const statusField = el('div', { class: 'col-md-2 fpim-field' }, el('div', { class: 'fpim-row', style: 'margin:0' }, status, badge), statusLabel, statusNote)
+
+    // Website title, with an AI suggestion from the parts' TradePeg titles (put in the box, not saved).
+    const title = text(d, 'label', { placeholder: 'What the website calls this product' })
+    const suggest = button([icon('fa-magic'), ' Suggest'], async () => {
+      suggest.disabled = true
+      fill(suggest, icon('fa-spinner fa-spin'), ' Suggest')
+      try {
+        const [r] = (await request('POST', adminPath('/ai/titles/suggest'), { json: { ids: [p.documentId] }, timeout: 120000 })) ?? []
+        if (!r?.suggestion) toast('info', 'The AI had no title to suggest.')
+        else if (title.isConnected) {
+          d.label = title.value = r.suggestion
+          changed()
+          toast('success', 'Title suggested — check it, then Save.')
+        }
+      } catch (error) {
+        toast('danger', error.status === 403 ? 'AI suggestions need a token with Pim → admin.' : error.message)
+      } finally {
+        suggest.disabled = state.readOnly
+        fill(suggest, icon('fa-magic'), ' Suggest')
+      }
+    }, 'btn-default', { disabled: state.readOnly, title: 'Suggest a website title with AI (not saved until you Save)' })
+    const titleBox = el('div', { class: 'input-group' }, title, el('span', { class: 'input-group-btn' }, suggest))
+
     const maker = state.data.product.manufacturer?.name ?? state.data.product.manufacturer ?? ''
     const brand = selectBox({
       kind: 'brands',
@@ -1274,9 +1337,12 @@
     })
     return section(
       'Product',
-      field('Website title', text(d, 'label', { placeholder: 'What the website calls this product' }), null, 6),
-      field('Status', status, 'Ready sends it to Google and eBay', 2),
-      field('Brand', brand, 'The brand customers see. A new name is added to the brand list. Never the manufacturer.', 4)
+      field('Website title', titleBox, null, 6),
+      statusField,
+      field('Brand', brand, 'The brand customers see. A new name is added to the brand list. Never the manufacturer.', 4),
+      readOnly('SKU', p.sku, null, 4),
+      readOnly('Manufacturer', maker || null, null, 4),
+      readOnly('Department', p.farlaBranded ? 'Farla Branded' : 'Other Branded', null, 4)
     )
   }
 
@@ -1521,33 +1587,103 @@
       paintTable()
     })
 
+    // Values other parents already use, offered while typing (one list per variation type).
+    view.open ??= new Set()
+    const valueLists = el('div')
+    const paintValueLists = () =>
+      fill(valueLists, d.variationTypes.map((t) => el('datalist', { id: `fpim-values-${t.id}` }, (view.suggestions?.[t.id] ?? []).map((x) => el('option', { value: x })))))
+    view.paintLists = paintValueLists // the newest drawing gets the answer
+    if (!view.suggestions) {
+      view.suggestions = {}
+      request('GET', adminPath(`/variations/${encodeURIComponent(data.product.documentId)}`))
+        .then((r) => {
+          view.suggestions = r?.suggestions ?? {}
+          view.paintLists?.()
+        })
+        .catch(() => { /* no suggestions, then */ })
+    }
+
+    const size = (u) => (u.lengthMm && u.widthMm && u.heightMm ? `${u.lengthMm}×${u.widthMm}×${u.heightMm} mm` : '—')
+    /** A part's units, read-only: they are TradePeg's. */
+    const unitsTable = (v) =>
+      v.uoms?.length
+        ? [
+            el(
+              'table',
+              { class: 'table-grid table-bordered fpim-units' },
+              el('thead', {}, el('tr', {}, ['Unit', 'SKU', 'Qty', 'GTIN', 'Weight (g)', 'Size (L×W×H mm)'].map((h) => el('th', {}, h)))),
+              el(
+                'tbody',
+                {},
+                v.uoms.map((u) =>
+                  el(
+                    'tr',
+                    {},
+                    el('td', {}, UOM_NAME[u.type] ?? u.type),
+                    el('td', { class: 'fpim-sku' }, u.uomSku),
+                    el('td', { class: 'text-right' }, u.qty ?? '—'),
+                    el('td', { class: `fpim-sku${u.gtin ? '' : ' fpim-amber'}` }, u.gtin || 'missing'),
+                    el('td', { class: 'text-right' }, u.weightG ?? '—'),
+                    el('td', {}, size(u).replace(/ mm$/, ''))
+                  )
+                )
+              )
+            ),
+            el('div', { class: 'fpim-help' }, 'Units, GTINs, weights and sizes are edited in TradePeg.'),
+          ]
+        : el('p', { class: 'text-muted', style: 'margin:0' }, 'No units in TradePeg yet.')
+
     function paintTable() {
       const cols = d.variationTypes
       const term = view.q.trim().toLowerCase()
       const matches = (v) =>
         !term || [v.sku, v.tradepegTitle, ...Object.values(d.variants[v.documentId].values)].some((x) => String(x ?? '').toLowerCase().includes(term))
       const list = variants.filter((v) => (view.eol || !v.eol) && matches(v))
+      const width = 5 + cols.length
+      paintValueLists()
       fill(
         tableHolder,
         el(
           'table',
           { class: 'table-grid table-bordered fpim-vtable' },
-          el('thead', {}, el('tr', {}, el('th', {}, 'SKU'), el('th', {}, 'TradePeg title'), cols.map((t) => el('th', {}, t.name)))),
+          el('thead', {}, el('tr', {}, el('th', { class: 'fpim-chev' }), el('th', { class: 'fpim-vthumb' }), el('th', {}, 'SKU'), el('th', {}, 'TradePeg title'), cols.map((t) => el('th', {}, t.name)), el('th', {}, 'Units'))),
           el(
             'tbody',
             {},
             list.length
               ? list.map((v) => {
                   const draft = d.variants[v.documentId]
-                  return el(
-                    'tr',
-                    {},
-                    el('td', { class: 'fpim-sku', style: 'white-space:nowrap' }, partLink(v.sku), v.eol ? el('span', { class: 'label label-danger', style: 'margin-left:6px' }, 'EOL') : null),
-                    el('td', { class: 'text-muted' }, v.tradepegTitle || ''),
-                    cols.map((t) => el('td', {}, text(draft.values, t.id, { placeholder: t.name })))
-                  )
+                  const open = view.open.has(v.documentId)
+                  const thumb = draft.images[0] ?? v.uomImages?.[0]?.image
+                  const chevron = iconButton(open ? 'fa-chevron-down' : 'fa-chevron-right', `${open ? 'Hide' : 'Show'} ${v.sku}’s units`, () => {
+                    if (open) view.open.delete(v.documentId)
+                    else view.open.add(v.documentId)
+                    paintTable()
+                  }, { 'aria-expanded': String(open) })
+                  const valueInput = (t) => {
+                    const input = text(draft.values, t.id, { placeholder: t.name })
+                    input.setAttribute('list', `fpim-values-${t.id}`)
+                    input.setAttribute('aria-label', `${t.name} of ${v.sku}`)
+                    const need = () => input.classList.toggle('fpim-need', !v.eol && !input.value.trim())
+                    input.addEventListener('input', need)
+                    need()
+                    return input
+                  }
+                  return [
+                    el(
+                      'tr',
+                      { class: v.eol ? 'fpim-eol' : null },
+                      el('td', { class: 'fpim-chev' }, chevron),
+                      el('td', { class: 'fpim-vthumb' }, thumb ? el('img', { src: thumb.thumb ?? thumb.url, alt: '' }) : el('span', { class: 'fpim-noimg', title: 'No picture yet' }, icon('fa-picture-o'))),
+                      el('td', { class: 'fpim-sku', style: 'white-space:nowrap' }, partLink(v.sku), v.eol ? el('span', { class: 'label label-danger', style: 'margin-left:6px' }, 'EOL') : null),
+                      el('td', { class: 'text-muted', title: v.tradepegTitle || null }, v.tradepegTitle || ''),
+                      cols.map((t) => el('td', {}, valueInput(t))),
+                      el('td', { class: 'text-muted', style: 'white-space:nowrap' }, v.uoms?.length ? v.uoms.map((u) => `${UOM_NAME[u.type] ?? u.type} ×${u.qty ?? 1}`).join(' · ') : 'None')
+                    ),
+                    open ? el('tr', { class: 'fpim-detail' }, el('td', { colspan: width }, unitsTable(v))) : null,
+                  ]
                 })
-              : el('tr', {}, el('td', { colspan: 2 + cols.length, class: 'text-muted' }, 'No variant matches.'))
+              : el('tr', {}, el('td', { colspan: width, class: 'text-muted' }, 'No variant matches.'))
           )
         ),
         list.length < variants.length ? el('p', { class: 'fpim-help' }, `Showing ${list.length} of ${variants.length}.`) : null
@@ -1564,7 +1700,8 @@
         find,
         eolCount ? el('label', { style: 'font-weight:normal;margin:0' }, showEol, ` Show ${plural(eolCount, 'end-of-life variant')}`) : null
       ),
-      tableHolder
+      tableHolder,
+      valueLists
     )
   }
 
@@ -1596,6 +1733,85 @@
       },
       sku
     )
+  }
+
+  // ---------------------------------------------------------------- prices (the Ready gate)
+
+  /**
+   * Whether the repricer has a price for each unit (POST /pricing-status). A
+   * parent cannot be Ready until every live unit has. Resolves { units }, or
+   * null when this PIM is too old to ask (then nothing is shown or gated);
+   * throws when the repricer cannot be asked. Answers are kept a minute.
+   */
+  let pricingRoute = true
+  const pricingCache = new Map()
+  async function pricingStatus(uomSkus) {
+    const skus = [...new Set(uomSkus.filter(Boolean))].sort()
+    if (!skus.length) return { units: {} }
+    if (!pricingRoute) return null
+    const key = skus.join('|')
+    const hit = pricingCache.get(key)
+    if (hit && Date.now() - hit.at < 60000) return hit.value
+    try {
+      const value = await request('POST', adminPath('/pricing-status'), { json: { uomSkus: skus } })
+      pricingCache.set(key, { at: Date.now(), value })
+      return value
+    } catch (error) {
+      if (error.status === 404) {
+        pricingRoute = false
+        return null
+      }
+      throw error
+    }
+  }
+  /** Of these units, the ones without a price; null while unknown. */
+  const unpricedOf = (units, priced) => (!units.length ? [] : priced ? units.filter((u) => !priced[u]?.priced) : null)
+  /** "Priced", "Not priced" or "2 of 5 not priced", next to Draft / Ready. */
+  function pricingBadge(units, priced) {
+    const unpriced = unpricedOf(units, priced)
+    if (unpriced === null || !units.length) return null
+    const ok = !unpriced.length
+    return el(
+      'span',
+      { class: `label ${ok ? 'label-success' : 'label-warning'} ml5 fpim-priced`, title: ok ? 'Every unit has its price set in the repricer' : `Not priced in the repricer: ${unpriced.join(', ')}` },
+      ok ? 'Priced' : unpriced.length === units.length ? 'Not priced' : `${unpriced.length} of ${units.length} not priced`
+    )
+  }
+  /** The parent's live units: the unit SKUs of the parts not at end of life. */
+  const liveUnits = (data) => data.variants.filter((v) => !v.eol).flatMap((v) => (v.uoms ?? []).map((u) => u.uomSku)).filter(Boolean)
+
+  /** Ask the repricer about the open parent's units; the Status box redraws when it answers. */
+  async function checkPricing() {
+    const data = state.data
+    if (!data) return
+    const sku = data.product.sku
+    const units = liveUnits(data)
+    state.pricing = { sku, units, state: units.length ? 'loading' : 'ok', priced: units.length ? null : {} }
+    if (!units.length) return state.paintStatus?.()
+    state.paintStatus?.()
+    try {
+      const r = await pricingStatus(units)
+      if (state.data?.product.sku !== sku) return
+      state.pricing = r ? { sku, units, state: 'ok', priced: r.units ?? {} } : { sku, units, state: 'none', priced: null }
+    } catch (error) {
+      if (state.data?.product.sku !== sku) return
+      state.pricing = { sku, units, state: 'error', error: error.message, priced: null }
+    }
+    state.paintStatus?.()
+  }
+
+  /** Why the open parent cannot be made Ready, or null when it can (exactly as Farla Tools decides). */
+  function readyBlock() {
+    const p = state.data.product
+    if (p.status === 'ready') return null
+    if ((p.missing ?? []).includes('variation values')) return 'Fix the variants first: every part needs its variation values, and no two parts the same.'
+    const pr = state.pricing?.sku === p.sku ? state.pricing : null
+    const units = pr?.units ?? liveUnits(state.data)
+    if (!units.length || pr?.state === 'none') return null
+    if (!pr || pr.state === 'loading') return 'Checking prices…'
+    if (pr.state === 'error') return `Could not check prices: ${pr.error}`
+    const unpriced = unpricedOf(units, pr.priced)
+    return unpriced?.length ? `Set the price in the repricer first: ${unpriced.join(', ')}` : null
   }
 
   // ---------------------------------------------------------------- website queue
@@ -1834,6 +2050,7 @@
    * Back, reload and bookmarks work.
    */
   const PAGES = [
+    ['overview', 'Overview', 'fa-dashboard'],
     ['products', 'Parents', 'fa-sitemap'],
     ['categories', 'Categories', 'fa-folder-open-o'],
     ['brands', 'Brands', 'fa-tag'],
@@ -1982,6 +2199,7 @@
       )
     }
     ;({
+      overview: overviewTool,
       products: productsTool,
       categories: categoriesTool,
       import: importTool,
@@ -2296,6 +2514,197 @@
       if (alive()) fill(out, el('div', { class: 'alert alert-danger' }, error.message))
       return null
     }
+  }
+
+  // ---------------------------------------------------------------- overview
+
+  GM_addStyle(`
+    .fpim .fpim-kpis .fpim-statcell { padding-top: 8px; padding-bottom: 8px; }
+    .fpim .fpim-kpis .fpim-stat { font-size: 26px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .fpim .fpim-kpis .fpim-sub { font-size: 12px; color: #777; }
+    .fpim .fpim-kpis .fpim-bar { margin: 6px 0 0; height: 6px; max-width: 220px; }
+    .fpim .fpim-misslist { list-style: none; margin: 0; padding: 4px 0; }
+    .fpim .fpim-misslist a { display: grid; grid-template-columns: 200px 1fr 56px; gap: 12px; align-items: center; padding: 5px 12px; color: inherit; text-decoration: none; }
+    .fpim .fpim-misslist a:hover, .fpim .fpim-misslist a:focus { background: #f5f5f5; }
+    .fpim .fpim-misslist a > span:first-child::first-letter { text-transform: uppercase; }
+    .fpim .fpim-misslist .fpim-bar { margin: 0; height: 8px; }
+    .fpim .fpim-misslist .fpim-bar > div { background: #3c8dbc; opacity: .75; }
+    .fpim .fpim-misslist .fpim-count { text-align: right; color: #777; font-variant-numeric: tabular-nums; }
+    .fpim .fpim-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+    .fpim .fpim-ovbox { padding: 10px 12px; }
+    .fpim .fpim-ovbox p { margin: 0 0 6px; }
+    .fpim .fpim-listed { display: flex; align-items: center; padding: 3px 0; }
+    .fpim .fpim-listed > span:nth-child(2) { flex: 1; }
+    .fpim .fpim-score { display: inline-block; min-width: 42px; padding: 2px 4px; border-radius: 3px; color: #fff; font-weight: 600; font-size: 12px; text-align: center; }
+    .fpim .fpim-worst td { vertical-align: middle; }
+    .fpim .fpim-ro-box { display: flex; align-items: center; justify-content: space-between; gap: 6px; background: #f5f5f5; color: #555; cursor: default; overflow: hidden; white-space: nowrap; }
+    .fpim .fpim-ro-box > span { overflow: hidden; text-overflow: ellipsis; }
+    .fpim .fpim-ready-note { margin-top: 2px; }
+    .fpim .form-control.fpim-need { border-color: #f0ad4e; box-shadow: inset 0 0 0 1px rgba(240,173,78,.35); }
+    .fpim .fpim-vtable tr.fpim-eol > td { opacity: .6; }
+    .fpim .fpim-vtable td.fpim-chev, .fpim .fpim-vtable th.fpim-chev { width: 30px; text-align: center; }
+    .fpim .fpim-vtable td.fpim-vthumb, .fpim .fpim-vtable th.fpim-vthumb { width: 46px; text-align: center; }
+    .fpim .fpim-vtable .fpim-noimg { display: inline-block; width: 36px; height: 36px; line-height: 34px; border: 1px dashed #ccc; color: #bbb; }
+    .fpim .fpim-units { width: auto; min-width: 60%; background: #fff; margin-bottom: 4px; }
+    .fpim .fpim-units td, .fpim .fpim-units th { padding: 4px 10px !important; }
+    .fpim .fpim-amber { color: #c77c02; }
+    .fpim .fpim-dragtile { cursor: grab; }
+    .fpim .fpim-dragtile.fpim-dragging { opacity: .4; }
+    .fpim .fpim-dragtile.fpim-dropon { box-shadow: 0 0 0 2px #3c8dbc; }
+  `)
+
+  const scoreColour = (n) => (n >= 80 ? '#5cb85c' : n >= 50 ? '#f0ad4e' : '#d9534f')
+
+  /**
+   * The PIM's front page, as a TradePeg dashboard: the catalogue in numbers,
+   * what is missing most (each opens Parents filtered to it), the TradePeg
+   * sync, where products are listed, and the least complete parents.
+   */
+  async function overviewTool(content, alive) {
+    headerActions(el('a', { href: '#pim/products', class: 'btn btn-default', onclick: (e) => { e.preventDefault(); openTools('products') } }, 'Parents ', icon('fa-arrow-right')))
+    const kpis = el('div', {}, spinner())
+    const missing = el('div', {}, spinner())
+    const sync = el('div', { class: 'fpim-ovbox' }, spinner())
+    const listed = el('div', { class: 'fpim-ovbox' }, spinner())
+    const worst = el('div', {}, spinner())
+    fill(
+      content,
+      tpPanel('Catalogue', null, kpis),
+      el(
+        'div',
+        { class: 'row' },
+        el('div', { class: 'col-md-8' }, tpPanel(el('span', { title: 'Click one to see the parents it affects' }, 'What is missing most'), null, missing)),
+        el(
+          'div',
+          { class: 'col-md-4' },
+          tpPanel('TradePeg sync', headButton([icon('fa-refresh'), ' Sync details'], () => openTools('sync'), 'btn-info', { title: 'Codes, units and GTINs come in from TradePeg' }), sync),
+          tpPanel('Listed on', null, listed)
+        )
+      ),
+      tpPanel(el('span', { title: 'The quickest wins' }, 'Least complete'), null, worst)
+    )
+
+    const paintSync = (s) => {
+      const tp = s.tradepeg
+      const running = s.tradepegRunning
+      const failed = tp?.status === 'failed'
+      const partial = tp?.status === 'partial'
+      const [colour, words] = running
+        ? ['#5bc0de', 'Syncing now…']
+        : failed
+          ? ['#d9534f', 'Last sync failed']
+          : partial
+            ? ['#f0ad4e', 'Synced with problems']
+            : ['#5cb85c', tp ? `Up to date — synced ${ago(tp.lastSuccessAt ?? tp.finishedAt)}` : 'Not synced yet']
+      const issues = (s.issues?.errors ?? 0) + (s.issues?.warnings ?? 0)
+      fill(
+        sync,
+        el('p', {}, el('span', { class: 'fpim-dot', style: `background:${colour}` }), el('strong', {}, tp || running ? words : 'Not synced yet')),
+        el('p', { class: 'text-muted' }, `Last checked ${ago(tp?.checkedAt ?? tp?.finishedAt)}`),
+        issues
+          ? el('p', {}, el('a', { href: '#pim/sync', class: 'text-warning', onclick: (e) => { e.preventDefault(); openTools('sync') } }, icon('fa-exclamation-triangle'), ` ${s.issues.errors ?? 0} errors, ${s.issues.warnings ?? 0} warnings to fix`))
+          : null
+      )
+    }
+    const loadSync = async () => {
+      try {
+        const s = await request('GET', adminPath('/state'))
+        if (alive()) paintSync(s)
+      } catch (error) {
+        if (alive()) fill(sync, el('p', { class: 'text-danger' }, error.message))
+      }
+    }
+    void loadSync()
+    const timer = setInterval(() => (alive() ? void loadSync() : clearInterval(timer)), 60000)
+
+    let s
+    try {
+      s = await request('GET', adminPath('/status'))
+    } catch (error) {
+      if (!alive()) return
+      const box = el('div', { class: 'fpim-ovbox' })
+      toolError(box, error, () => overviewTool(content, alive))
+      fill(kpis, box)
+      for (const x of [missing, listed, worst]) fill(x)
+      return
+    }
+    if (!alive()) return
+    const live = s.products.total - s.products.archived
+    const ready = s.products.byStatus?.ready ?? 0
+    const avg = s.completeness.average
+    const kpi = (label, value, sub, extra = null) =>
+      el('div', { class: 'col-md-3 fpim-field fpim-statcell' }, el('div', { class: 'fpim-stat' }, value), sub ? el('div', { class: 'fpim-sub' }, sub) : null, extra, el('div', { class: 'help-block' }, label))
+    fill(
+      kpis,
+      el(
+        'div',
+        { class: 'formRow fluid fpim-kpis' },
+        kpi('Products', live.toLocaleString('en-GB'), `${s.products.archived} archived`),
+        kpi('Ready', ready.toLocaleString('en-GB'), live ? `${Math.round((ready / live) * 100)}% of live products` : null),
+        kpi('Average completeness', `${avg}%`, null, el('div', { class: 'fpim-bar' }, el('div', { style: `width:${avg}%;background:${scoreColour(avg)}` }))),
+        kpi('Variants', (s.variants.total - s.variants.eol).toLocaleString('en-GB'), `${s.variants.eol} end-of-life${s.variants.withoutUnits ? ` · ${s.variants.withoutUnits} without units` : ''}`),
+        el('div', { class: 'clear' })
+      )
+    )
+
+    const top = (s.completeness.missing ?? []).slice(0, 9)
+    fill(
+      missing,
+      top.length
+        ? el(
+            'ul',
+            { class: 'fpim-misslist' },
+            top.map((m) =>
+              el(
+                'li',
+                {},
+                el(
+                  'a',
+                  { href: '#pim/products', title: `Show the ${plural(m.count, 'parent')} missing ${m.check}`, onclick: (e) => { e.preventDefault(); openParentsFiltered({ missing: [m.check] }) } },
+                  el('span', {}, m.check),
+                  el('span', { class: 'fpim-bar' }, el('div', { style: `width:${(m.count / Math.max(1, live)) * 100}%` })),
+                  el('span', { class: 'fpim-count' }, m.count.toLocaleString('en-GB'))
+                )
+              )
+            )
+          )
+        : el('div', { class: 'fpim-ovbox text-success' }, icon('fa-check-circle'), ' Every live product is complete.')
+    )
+
+    fill(
+      listed,
+      [
+        ['web', 'Website', '#5cb85c'],
+        ['google', 'Google Shopping', '#5bc0de'],
+        ['ebay', 'eBay', '#f0ad4e'],
+      ].map(([key, label, colour]) =>
+        el('div', { class: 'fpim-listed' }, el('span', { class: 'fpim-dot', style: `background:${colour}` }), el('span', {}, label), el('span', { class: 'text-muted' }, (s.products.channels?.[key] ?? '—').toLocaleString('en-GB')))
+      )
+    )
+
+    const open = (sku) => (e) => { e.preventDefault(); openTools('parent', sku) }
+    fill(
+      worst,
+      el(
+        'table',
+        { class: 'table-grid table-bordered table-hover fpim-worst' },
+        el('thead', {}, el('tr', {}, el('th', { style: 'width:70px' }, 'Complete'), el('th', { style: 'width:170px' }, 'Reference'), el('th', {}, 'Title'), el('th', {}, 'Missing'))),
+        el(
+          'tbody',
+          {},
+          (s.completeness.worst ?? []).slice(0, 10).map((w) =>
+            el(
+              'tr',
+              {},
+              el('td', {}, el('span', { class: 'fpim-score', style: `background:${scoreColour(w.score)}` }, `${w.score}%`)),
+              el('td', { class: 'fpim-sku' }, el('a', { href: `#pim/parent/${encodeURIComponent(w.sku)}`, onclick: open(w.sku) }, w.sku)),
+              el('td', {}, w.label || el('span', { class: 'text-muted' }, 'No title')),
+              el('td', { class: 'text-muted' }, (w.missing ?? []).join(' · '))
+            )
+          )
+        )
+      )
+    )
   }
 
   // ---------------------------------------------------------------- products
@@ -2617,14 +3026,14 @@
 
   const CHANNEL_NAMES = { web: 'Website', google: 'Google', ebay: 'eBay' }
   /** Every column the parents list can show. `sort` is the PIM's sort key, when it sorts. */
-  function parentColumns(customFields = []) {
+  function parentColumns(customFields = [], priced = null) {
     const nowrap = { style: 'white-space:nowrap' }
     return [
       // As on TradePeg's Parts list: the picture opens the parent (a click elsewhere ticks the row).
       { key: 'image', label: 'Image', cell: (r) => el('td', { class: 'fpim-thumb' }, el('a', { href: `#pim/parent/${encodeURIComponent(r.sku)}`, title: `Open ${r.sku}`, onclick: (e) => { e.preventDefault(); openTools('parent', r.sku) } }, r.thumbnail ? el('img', { src: r.thumbnail, alt: '' }) : el('span', { class: 'fpim-noimg', title: 'No picture yet' }, icon('fa-picture-o')))) },
       { key: 'sku', label: 'Reference', sort: 'sku', locked: true, cell: (r) => el('td', nowrap, el('a', { href: `#pim/parent/${encodeURIComponent(r.sku)}`, onclick: (e) => { e.preventDefault(); openTools('parent', r.sku) } }, r.sku), r.archived ? el('span', { class: 'label label-danger ml5' }, 'Archived') : null) },
       { key: 'label', label: 'Title', sort: 'label', cell: (r) => el('td', {}, r.label) },
-      { key: 'status', label: 'Status', sort: 'status', cell: (r) => el('td', {}, el('span', { class: `label ${r.status === 'ready' ? 'label-success' : 'label-default'}` }, NICE[r.status] ?? r.status)) },
+      { key: 'status', label: 'Status', sort: 'status', cell: (r) => el('td', { style: 'white-space:nowrap' }, el('span', { class: `label ${r.status === 'ready' ? 'label-success' : 'label-default'}` }, NICE[r.status] ?? r.status), pricingBadge(r.units ?? [], priced)) },
       { key: 'kind', label: 'Type', sort: 'kind', cell: (r) => el('td', {}, NICE[r.kind] ?? r.kind ?? '') },
       { key: 'brand', label: 'Brand', sort: 'brand', cell: (r) => el('td', {}, r.brand ?? '') },
       { key: 'manufacturer', label: 'Manufacturer', sort: 'manufacturer', cell: (r) => el('td', {}, r.manufacturer ?? '') },
@@ -2718,6 +3127,23 @@
     )
   }
 
+  /** Archived parents in the list: 'hide' (the default), 'show' (with the rest) or 'only'. An old `true` means 'show'. */
+  function archivedMode(v) {
+    return v === true ? 'show' : v === 'show' || v === 'only' ? v : 'hide'
+  }
+  /** The Parents list's filter as the PIM takes it (query, bulk, export, saved queues). "Only archived" is a condition. */
+  function listFilter(g) {
+    const mode = archivedMode(g?.archived)
+    return {
+      search: g?.search ?? '',
+      facets: g?.facets ?? {},
+      queue: g?.queue || null,
+      archived: mode !== 'hide',
+      conditions: mode === 'only' ? [{ field: 'archived', op: 'is_true' }] : [],
+    }
+  }
+  const ARCHIVED_CHOICES = [['hide', 'Hide archived'], ['show', 'Include archived'], ['only', 'Only archived']]
+
   /**
    * The catalogue, laid out like TradePeg's Items page: a Search panel (search
    * box, then the filters as dropdowns labelled underneath) and a results panel
@@ -2755,17 +3181,33 @@
       el('div', { class: 'panel-body p0' }, table)
     )
     let result = null
+    // The repricer's word on the units of the rows on this page (null until it answers, or on an old PIM).
+    let priced = null
+    let pricedAsked = 0
+    async function askPricing(rows) {
+      const mine = ++pricedAsked
+      priced = null
+      const units = rows.flatMap((r) => r.units ?? [])
+      if (!units.length) return
+      try {
+        const r = await pricingStatus(units)
+        if (!r || !alive() || mine !== pricedAsked) return
+        priced = r.units ?? {}
+        paintTable()
+      } catch { /* no badges, then */ }
+    }
     let openFacet = null
     const facetFind = {} // what is typed in each filter's find box
     let timer = null
     let asked = 0
 
-    const filter = () => ({ search: f.search, facets: f.facets, queue: f.queue || null, archived: Boolean(f.archived) })
-    // As TradePeg's "Include EOL": archived parents (no longer in SELECT) only when ticked.
-    const archivedBox = el('input', { type: 'checkbox', value: '1', class: 'form-control', 'aria-label': 'Include archived' })
-    archivedBox.checked = Boolean(f.archived)
+    const filter = () => listFilter(f)
+    // As TradePeg's "Include EOL": archived parents (no longer in SELECT) are hidden unless asked for.
+    f.archived = archivedMode(f.archived)
+    const archivedBox = el('select', { class: 'form-control', 'aria-label': 'Archived parents' }, ARCHIVED_CHOICES.map(([k, label]) => el('option', { value: k }, label)))
+    archivedBox.value = f.archived
     archivedBox.addEventListener('change', () => {
-      f.archived = archivedBox.checked
+      f.archived = archivedBox.value
       refilter()
     })
 
@@ -2798,8 +3240,8 @@
           f.search = q?.filter?.search ?? ''
           f.facets = q?.filter?.facets ?? {}
           f.queue = q?.filter?.queue ?? null
-          f.archived = Boolean(q?.filter?.archived)
-          archivedBox.checked = f.archived
+          f.archived = (q?.filter?.conditions ?? []).some((c) => c?.field === 'archived' && c.op === 'is_true') ? 'only' : archivedMode(q?.filter?.archived)
+          archivedBox.value = f.archived
           search.value = f.search
           refilter()
           f.savedId = id
@@ -2845,8 +3287,10 @@
         result = r
         table.style.opacity = ''
         paintFacets()
+        priced = null
         paintTable()
         paintBulk()
+        void askPricing(r.rows ?? [])
       } catch (error) {
         if (alive() && mine === asked) {
           table.style.opacity = ''
@@ -2953,7 +3397,7 @@
     }
 
     function paintFacets() {
-      const anyFilter = f.search || f.queue || f.archived || Object.values(f.facets).some((v) => v.length)
+      const anyFilter = f.search || f.queue || f.archived !== 'hide' || Object.values(f.facets).some((v) => v.length)
       const byKey = Object.fromEntries(FACETS)
       fill(facetsTop, ['status', 'categories', 'manufacturer'].map((k) => facet(k, byKey[k])))
       fill(facetsMore, ['brand', 'channels', 'tags', 'kind', 'missing'].map((k) => facet(k, byKey[k])))
@@ -2966,8 +3410,8 @@
               f.facets = {}
               f.search = ''
               f.queue = null
-              f.archived = false
-              archivedBox.checked = false
+              f.archived = 'hide'
+              archivedBox.value = 'hide'
               search.value = ''
               refilter()
               paintQueue()
@@ -3014,7 +3458,7 @@
           label,
           f.sort === key ? (f.direction === 'asc' ? ' ▲' : ' ▼') : ''
         )
-      const known = parentColumns(result.customFields)
+      const known = parentColumns(result.customFields, priced)
       const shownColumns = columns.map((k) => known.find((c) => c.key === k)).filter(Boolean)
       if (!shownColumns.some((c) => c.locked)) shownColumns.unshift(known.find((c) => c.locked))
       const pageBox = el('input', { type: 'checkbox', class: 'form-control', title: 'Tick every parent on this page' })
@@ -3177,7 +3621,7 @@
       tpPanel(
         'Search',
         searchTools,
-        el('div', { class: 'formRow fluid' }, el('div', { class: 'col-md-5 fpim-field' }, search, el('div', { class: 'help-block', title: 'SKU, title, brand, or any variant’s SKU' }, 'Search')), el('div', { class: 'col-md-1 fpim-field' }, archivedBox, el('div', { class: 'help-block text-center', title: 'Parents none of whose parts are in TradePeg’s SELECT range any more' }, 'Include archived')), facetsTop, el('div', { class: 'clear' })),
+        el('div', { class: 'formRow fluid' }, el('div', { class: 'col-md-4 fpim-field' }, search, el('div', { class: 'help-block', title: 'SKU, title, brand, or any variant’s SKU' }, 'Search')), el('div', { class: 'col-md-2 fpim-field' }, archivedBox, el('div', { class: 'help-block', title: 'Parents none of whose parts are in TradePeg’s SELECT range any more' }, 'Archived')), facetsTop, el('div', { class: 'clear' })),
         el('div', { class: 'formRow fluid' }, facetsMore, queueBox, el('div', { class: 'clear' }))
       ),
       notice,
@@ -5105,7 +5549,7 @@
       variants: new Set(known(all.variants, saved.variants) ?? all.variants.map((c) => c.key)),
     }
     const grid = toolState.grid
-    const listFiltered = Boolean(grid && (grid.search || grid.queue || grid.archived || Object.values(grid.facets ?? {}).some((v) => v.length)))
+    const listFiltered = Boolean(grid && (grid.search || grid.queue || archivedMode(grid.archived) !== 'hide' || Object.values(grid.facets ?? {}).some((v) => v.length)))
     // After "Tick all that match" the list's filter says which; picked then holds the unticked.
     const ticked = grid?.all ? 0 : grid?.picked?.size ?? 0
     let scope = toolState.exportScope === 'list' && (ticked || listFiltered) ? (ticked ? 'ticked' : 'list') : 'all'
@@ -5148,7 +5592,7 @@
         all: {},
         draft: { filter: { facets: { status: ['draft'] } } },
         ready: { filter: { facets: { status: ['ready'] } } },
-        list: { filter: { search: grid?.search ?? '', facets: grid?.facets ?? {}, queue: grid?.queue ?? null, archived: Boolean(grid?.archived) } },
+        list: { filter: listFilter(grid) },
         ticked: { ids: [...(grid?.picked ?? [])] },
       })[scope] ?? {}
 
@@ -6866,6 +7310,7 @@
       void upload([...(e.dataTransfer?.files ?? [])])
     })
 
+    let dragging = null // the picture being dragged: { tag, index }
     const gallery = tags
       .concat([...groups.keys()].filter((t) => !tags.some((x) => x.key === t)).map((t) => ({ key: t, sku: t, name: 'No longer one of its units', help: '' })))
       .filter((t) => groups.get(t.key).length)
@@ -6887,10 +7332,11 @@
                   next.get(retag.value).push(f)
                 }, `Moved the picture to ${tagSku(retag.value)}.`)
               )
-              return el(
+              // Drag a picture onto another of the same tag to put it there.
+              const tile = el(
                 'div',
-                { class: 'fpim-image fpim-tile' },
-                el('a', { href: f.url, target: '_blank', rel: 'noreferrer' }, el('img', { src: f.thumb, alt: f.alt ?? '' })),
+                { class: 'fpim-image fpim-tile fpim-dragtile', draggable: 'true', title: files.length > 1 ? 'Drag to change the order' : null },
+                el('a', { href: f.url, target: '_blank', rel: 'noreferrer', draggable: 'false' }, el('img', { src: f.thumb, alt: f.alt ?? '', draggable: 'false' })),
                 i === 0 ? el('div', { class: 'fpim-first' }, 'First') : el('div', { class: 'fpim-help' }, `#${i + 1}`),
                 el(
                   'div',
@@ -6898,10 +7344,38 @@
                   iconButton('fa-arrow-left', 'Move left', () => change((next) => move(next.get(t.key), i, -1)), { disabled: i === 0 }),
                   iconButton('fa-arrow-right', 'Move right', () => change((next) => move(next.get(t.key), i, 1)), { disabled: i === files.length - 1 }),
                   iconButton('fa-crop', 'Crop to the product', () => void cropDialog({ sku: data.product.sku, fileId: f.id, onSaved: () => void loadPictures(holder, sku) })),
+                  iconButton('fa-magic', 'Fix with AI', () => openTools('ai', `pictures:${data.product.sku}:${f.id}`)),
                   iconButton('fa-times', 'Remove', () => { if (confirm(t.key === PARENT ? `Remove this picture from every part of ${data.product.sku}?` : 'Remove this picture from the website?')) change((next) => next.get(t.key).splice(i, 1), 'Removed.') })
                 ),
                 retag
               )
+              tile.addEventListener('dragstart', (e) => {
+                if (e.target !== tile) return
+                dragging = { tag: t.key, index: i }
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('text/plain', String(f.id))
+                tile.classList.add('fpim-dragging')
+              })
+              tile.addEventListener('dragend', () => {
+                dragging = null
+                tile.classList.remove('fpim-dragging')
+                for (const x of holder.querySelectorAll('.fpim-dropon')) x.classList.remove('fpim-dropon')
+              })
+              tile.addEventListener('dragover', (e) => {
+                if (dragging?.tag !== t.key || dragging.index === i) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                tile.classList.add('fpim-dropon')
+              })
+              tile.addEventListener('dragleave', () => tile.classList.remove('fpim-dropon'))
+              tile.addEventListener('drop', (e) => {
+                if (dragging?.tag !== t.key || dragging.index === i) return
+                e.preventDefault()
+                const from = dragging.index
+                dragging = null
+                change((next) => next.get(t.key).splice(i, 0, ...next.get(t.key).splice(from, 1)))
+              })
+              return tile
             })
           )
         )
