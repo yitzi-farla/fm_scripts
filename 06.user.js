@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.16.2
+// @version      3.17.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -54,10 +54,14 @@
  *   part has of its own (its variation values).
  *
  * It talks to the PIM's content API (repos/pim src/api/pim) with a Strapi API
- * token of type Custom. Under Pim tick lookup, update, upload and options for
- * the tab, and admin for PIM tools. lookup alone gives a read-only tab. The
- * token is pasted in once and kept in this browser's Tampermonkey storage —
- * never in this file, which is public.
+ * token, which it gets by itself: it asks the PIM for a one-time code, posts it
+ * as a TradePeg comment on Farla's own contact (as the user signed in here),
+ * and the PIM reads the comment's author back from TradePeg and hands out a
+ * token named after them (repos/pim src/pim/signin.js; the same proof as 04's
+ * Repricer). The token is kept in this browser's Tampermonkey storage — never
+ * in this file, which is public — and fetched again when it lapses or someone
+ * else signs in to TradePeg. A token pasted under Settings (Custom, Pim →
+ * lookup, update, upload, options, admin) is used instead while it works.
  *
  * Every save sends the product's updatedAt from when it was loaded; if someone
  * has saved it since, the PIM refuses rather than overwrite their work.
@@ -74,6 +78,7 @@
   const DEFAULT_PIM_URL = 'https://farla-pim-production.up.railway.app'
   const WEBSITE_URL = 'https://farlamedical.co.uk/en/uk/products/'
   const TOKEN_KEY = 'pimToken'
+  const SIGNIN_KEY = 'pimSignin'
   const URL_KEY = 'pimUrl'
   const TAB = 'tab_pim'
 
@@ -466,14 +471,66 @@
     const saved = (GM_getValue(URL_KEY) || '').replace(/\/$/, '')
     return (saved && !NEVER_LIVE.includes(saved) ? saved : DEFAULT_PIM_URL).replace(/\/$/, '')
   }
-  const hasToken = () => Boolean(GM_getValue(TOKEN_KEY))
+  // Always: with no token saved, the first call signs in through TradePeg.
+  const hasToken = () => true
+  const pastedToken = () => GM_getValue(TOKEN_KEY) || ''
 
   /**
    * One call to the PIM. `json` is sent as JSON, `form` (FormData) as multipart;
    * `blob` asks for a file back (exports, templates) as { blob, name }.
+   * Signs in first when there is no token, and once more if the PIM refuses it.
    */
-  function request(method, path, { json, form, blob = false, timeout } = {}) {
-    const token = GM_getValue(TOKEN_KEY)
+  async function request(method, path, options = {}) {
+    const token = pastedToken() || signedInToken() || (await signIn())
+    try {
+      return await send(method, path, options, token)
+    } catch (error) {
+      if (error.status !== 401) throw error
+      GM_deleteValue(token === pastedToken() ? TOKEN_KEY : SIGNIN_KEY)
+      return send(method, path, options, await signIn())
+    }
+  }
+
+  // ---------------------------------------------------------------- sign-in
+
+  /** The TradePeg user signed in, as TradePeg's top bar shows them. */
+  const tpUser = () => document.querySelector('.profile-dropdown-text .username, span.username')?.textContent.trim() || ''
+
+  /** This browser's signed-in token, while it is fresh and still the TradePeg user's on screen. */
+  function signedInToken() {
+    const saved = GM_getValue(SIGNIN_KEY, null)
+    if (!saved?.token || new Date(saved.expiresAt).getTime() - 60 * 60_000 < Date.now()) return ''
+    const user = tpUser()
+    return !user || !saved.user || saved.user === user ? saved.token : ''
+  }
+
+  let signingIn = null
+  /** A token from the PIM for whoever is signed in to TradePeg here; one sign-in for calls made at once. */
+  function signIn() {
+    signingIn ??= (async () => {
+      log('signing in to the PIM through TradePeg')
+      const { challengeId, contactId, note } = await send('POST', '/api/pim/signin/challenge', { json: {} })
+      const posted = await fetch(`/wapp/${location.pathname.split('/')[2] || 'en-gb'}/io/post/`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ concept: 'doc-note', baseType: 'CONTACTS', baseId: contactId, note }),
+      })
+      if (!posted.ok) throw new Error(`Could not sign in to the PIM: TradePeg answered ${posted.status}`)
+      const signedIn = await send('POST', '/api/pim/signin/verify', { json: { challengeId } })
+      // The PIM deletes the comment too; as its author, so can we.
+      if (signedIn.noteId) void fetch(`/wapp/${location.pathname.split('/')[2] || 'en-gb'}/io/post/legacy/?concept=delete-note&noteId=${signedIn.noteId}`, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(() => {})
+      GM_setValue(SIGNIN_KEY, { token: signedIn.token, expiresAt: signedIn.expiresAt, user: tpUser() || signedIn.name, name: signedIn.name })
+      // A new token may be allowed to save: the editor is no longer locked by the old one's 403.
+      state.readOnly = false
+      log('signed in to the PIM as', signedIn.name)
+      return signedIn.token
+    })().finally(() => { signingIn = null })
+    return signingIn
+  }
+
+  /** One call to the PIM with this token (none for sign-in itself). */
+  function send(method, path, { json, form, blob = false, timeout } = {}, token) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {}
     if (json !== undefined) headers['Content-Type'] = 'application/json'
     return new Promise((resolve, reject) => {
@@ -530,7 +587,7 @@
   /** The settings form, shared by the tab and the PIM pages. */
   function settingsForm(onSaved, onBack) {
     const url = el('input', { class: 'form-control', value: pimUrl() })
-    const token = el('input', { class: 'form-control', type: 'password', placeholder: hasToken() ? 'A token is saved — paste a new one to replace it' : 'Paste the Strapi API token' })
+    const token = el('input', { class: 'form-control', type: 'password', placeholder: pastedToken() ? 'A token is pasted — paste a new one to replace it' : 'Signs in through TradePeg by itself' })
     return el(
       'div',
       { style: 'max-width: 560px; margin: 0 auto; text-align: left' },
@@ -541,7 +598,7 @@
       el(
         'p',
         { class: 'help-block' },
-        'Kept in this browser only. Ask whoever runs the PIM for a token. It needs Pim → lookup, update, upload, options and admin. With lookup alone everything is read-only.'
+        'Leave empty: the PIM signs you in through TradePeg. A pasted token (Pim → lookup, update, upload, options, admin) is used instead.'
       ),
       button('Save', () => {
         GM_setValue(URL_KEY, url.value.trim() || DEFAULT_PIM_URL)
@@ -704,7 +761,7 @@
       void checkPricing()
     } catch (error) {
       if (mine !== state.generation) return
-      if (error.status === 401 || error.status === 403) return showSettings('The PIM refused the token. Paste a new one.')
+      if (error.status === 401 || error.status === 403) return showSettings(`The PIM refused: ${error.message}`)
       if (error.status === 404) {
         return showState(
           el('p', {}, el('strong', {}, state.sku), ' is not in the PIM yet.'),
@@ -3011,8 +3068,6 @@
 
   // ---------------------------------------------------------------- each user's own choices
 
-  /** The TradePeg user signed in, as TradePeg's top bar shows them. */
-  const tpUser = () => document.querySelector('.profile-dropdown-text .username, span.username')?.textContent.trim() || ''
   const PREF_KEY = (key) => `pimPref:${key}`
 
   /**
@@ -4330,7 +4385,8 @@
   /** Settings: this computer's connection to the PIM, then the channels (feed pricelists, eBay defaults). */
   function settingsTool(content, alive) {
     const url = el('input', { class: 'form-control', value: pimUrl() })
-    const token = el('input', { class: 'form-control', type: 'password', placeholder: hasToken() ? 'Saved — paste a new one to replace it' : 'Paste the API token' })
+    const token = el('input', { class: 'form-control', type: 'password', placeholder: pastedToken() ? 'Pasted — paste a new one to replace it' : 'Signs in through TradePeg by itself' })
+    const signedIn = GM_getValue(SIGNIN_KEY, null)
     const channels = el('div')
     const save = () => {
       GM_setValue(URL_KEY, url.value.trim() || DEFAULT_PIM_URL)
@@ -4352,7 +4408,7 @@
           'div',
           { class: 'formRow fluid' },
           field('PIM address', url, null, 6),
-          field('API token', token, 'Kept in this browser only. Ask whoever runs the PIM for one; it needs Pim → lookup, update, upload, options and admin.', 6),
+          field('API token', token, pastedToken() ? 'Pasted token in use' : signedIn?.name ? `Signed in as ${signedIn.name} through TradePeg` : 'Leave empty to sign in through TradePeg', 6),
           el('div', { class: 'clear' })
         )
       ),
