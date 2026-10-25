@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.18.1
+// @version      3.19.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -4612,20 +4612,58 @@
     headerActions()
     const body = el('div', {}, spinner())
     const addBtn = headButton([icon('fa-plus'), ' Add a field'], () => addDialog(), 'btn-success')
-    fill(content, tpPanel('Product fields', addBtn, el('div', { class: 'panel-body' }, body)))
+    const ownBody = el('div', {}, spinner())
+    fill(
+      content,
+      tpPanel('Product fields', addBtn, el('div', { class: 'panel-body' }, body)),
+      tpPanel('The PIM’s own fields', null, el('div', { class: 'panel-body' }, el('p', { class: 'text-muted' }, 'Every product has these. Tick the ones that count towards a product’s completeness score and its Missing list.'), ownBody))
+    )
     let info = null
+    let checks = []
 
     async function load() {
       try {
-        info = await request('GET', adminPath('/fields'))
+        ;[info, checks] = await Promise.all([request('GET', adminPath('/fields')), request('GET', adminPath('/completeness'))])
       } catch (error) {
         return alive() && toolError(body, error, load)
       }
       if (alive()) paint()
     }
 
+    /** "Counts towards completeness" for one field: saved as soon as it is ticked. */
+    function countsBox(key) {
+      const check = checks.find((c) => c.key === key)
+      if (!check) return null
+      const box = el('input', { type: 'checkbox', 'aria-label': `${check.field} counts towards completeness` })
+      box.checked = check.counted
+      box.addEventListener('change', async () => {
+        box.disabled = true
+        try {
+          checks = await request('PUT', adminPath('/completeness'), { json: { key, counted: box.checked } })
+          toast('success', `${check.field} ${box.checked ? 'now counts' : 'no longer counts'} towards completeness.`)
+        } catch (error) {
+          toast('danger', error.message)
+        }
+        if (alive()) paint()
+      })
+      return el('label', { style: 'font-weight:normal;margin:0' }, box, check.counted !== check.default ? el('span', { class: 'text-muted' }, ` (default: ${check.default ? 'counts' : 'does not count'})`) : null)
+    }
+
+    function paintOwn() {
+      fill(
+        ownBody,
+        el(
+          'table',
+          { class: 'table-grid table-bordered fpim-grid-table' },
+          el('thead', {}, el('tr', {}, ['Field', 'Done when', 'Counts towards completeness'].map((h) => el('th', { class: 'no-sort' }, h)))),
+          el('tbody', {}, checks.filter((c) => !c.custom).map((c) => el('tr', {}, el('td', {}, el('strong', {}, c.field)), el('td', { class: 'text-muted' }, c.rule ?? 'Filled in'), el('td', {}, countsBox(c.key)))))
+        )
+      )
+    }
+
     function paint() {
       const { fields } = info
+      paintOwn()
       fill(
         body,
         info.restartDue ? el('div', { class: 'alert alert-warning' }, icon('fa-refresh'), ' A change is waiting for the PIM to restart. ', button('Restart now', () => void waitForRestart('Restarting the PIM…', true))) : null,
@@ -4633,7 +4671,7 @@
           ? el(
               'table',
               { class: 'table-grid table-bordered fpim-grid-table' },
-              el('thead', {}, el('tr', {}, ['Name', 'Kind', 'Choices', 'Products using it', ''].map((h) => el('th', { class: 'no-sort' }, h)))),
+              el('thead', {}, el('tr', {}, ['Name', 'Kind', 'Choices', 'Products using it', 'Counts towards completeness', ''].map((h) => el('th', { class: 'no-sort' }, h)))),
               el(
                 'tbody',
                 {},
@@ -4645,6 +4683,7 @@
                     el('td', {}, f.typeLabel),
                     el('td', { class: 'text-muted' }, (f.options ?? []).join(', ')),
                     el('td', {}, f.used ? plural(f.used, 'product') : el('span', { class: 'text-muted' }, 'None')),
+                    el('td', {}, f.pending ? null : countsBox(`custom.${f.key}`)),
                     el(
                       'td',
                       { style: 'white-space:nowrap;text-align:right' },
