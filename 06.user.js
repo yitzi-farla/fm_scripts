@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.17.0
+// @version      3.18.1
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -38,8 +38,9 @@
  *   drawn TradePeg's way; keep the two in step. A parent opens at
  *   #pim/parent/<VARPAR>: its title, status, brand, description, key features,
  *   specs, what's in the box, its pictures (one set for the whole range),
- *   videos, documents, categories, tags, website / Google / eBay, variation
- *   types and each variant's title and values, with Save and Preview. Back,
+ *   videos, documents, categories, tags, related products and upsells,
+ *   website / Google / eBay, variation types and each variant's title and
+ *   values, with Save and Preview. Back,
  *   reload and bookmarks work.
  *
  *   On a part's page: its VARPAR (Details) opens the parent, and its Images tab
@@ -265,6 +266,8 @@
     .fpim .fpim-summary > .fpim-statcell:last-child { display: flex; gap: 4px; }
     .fpim .fpim-ib { padding: 3px 7px; }
     .fpim .fpim-row-tools { flex: 0 0 auto; }
+    .fpim .fpim-link-thumb { flex: 0 0 auto; width: 36px; height: 36px; object-fit: contain; border: 1px solid #ddd; background: #fff; }
+    .fpim span.fpim-link-thumb { display: inline-block; line-height: 34px; text-align: center; border-style: dashed; color: #bbb; }
     .fpim .fpim-image .btn-group .fpim-ib { flex: 1; }
     .fpim .fpim-jump { margin: 12px 0 0; }
     .fpim h5 { color: #1f730c; }
@@ -640,6 +643,8 @@
       documentation: p.documentation.map((x) => ({ name: x.name ?? '', link: x.link ?? '', file: x.file })),
       categories: p.categories.map((c) => ({ id: c.id, path: c.path })),
       tags: [...p.tags],
+      relatedProducts: [...(p.relatedProducts ?? [])],
+      upsells: [...(p.upsells ?? [])],
       channelWeb: p.channels.web,
       seoTitle: p.seoTitle ?? '',
       seoDescription: p.seoDescription ?? '',
@@ -680,6 +685,9 @@
     const ids = (list) => list.map((x) => x.id)
     for (const k of ['categories', 'images', 'variationTypes']) if (!same(ids(base[k]), ids(draft[k]))) patch[k] = ids(draft[k])
     for (const k of ['googleCategory', 'ebayCategory']) if (!same(base[k]?.id, draft[k]?.id)) patch[k] = draft[k]?.id ?? null
+    // Which items, in order: their titles and pictures are the PIM's to look up.
+    const picked = (list) => list.map(({ level, sku }) => ({ level, sku }))
+    for (const k of ['relatedProducts', 'upsells']) if (!same(picked(base[k]), picked(draft[k]))) patch[k] = picked(draft[k])
     const custom = Object.fromEntries(Object.entries(draft.custom ?? {}).filter(([k, v]) => String(v ?? '') !== String(base.custom?.[k] ?? '')).map(([k, v]) => [k, v === '' ? null : v]))
     if (Object.keys(custom).length) patch.custom = custom
     const variants = {}
@@ -979,7 +987,7 @@
    * A search box over one of the PIM's lists (GET /api/pim/options/:kind).
    * `allowNew` offers what was typed as a new name.
    */
-  function picker({ kind, placeholder, allowNew = false, onPick }) {
+  function picker({ kind, placeholder, allowNew = false, query = '', label = null, onPick }) {
     const input = el('input', { class: 'form-control', placeholder, autocomplete: 'off', spellcheck: 'false', disabled: state.readOnly })
     const list = el('ul', { class: 'fpim-options', style: 'display:none' })
     let items = []
@@ -1002,7 +1010,7 @@
           el(
             'li',
             { class: i === hi ? 'fpim-hi' : null, onmousedown: (e) => { e.preventDefault(); choose(item) } },
-            item.isNew ? `Add “${item.name}”` : item.path ?? item.name,
+            item.isNew ? `Add “${item.name}”` : label ? label(item) : item.path ?? item.name,
             item.code ? el('span', { class: 'text-muted' }, ` (${item.code})`) : null
           )
         )
@@ -1014,7 +1022,7 @@
       const q = input.value.trim()
       const mine = ++asked
       try {
-        const found = await request('GET', `/api/pim/options/${kind}?q=${encodeURIComponent(q)}&limit=30`)
+        const found = await request('GET', `/api/pim/options/${kind}?q=${encodeURIComponent(q)}&limit=30${query}`)
         if (mine !== asked) return
         items = found
         if (allowNew && q && !found.some((f) => (f.name ?? '').toLowerCase() === q.toLowerCase())) items = [{ name: q, isNew: true }, ...found]
@@ -1228,6 +1236,60 @@
     ])
   }
 
+  const LEVEL_NAME = { product: 'Product', variant: 'Variant', uom: 'UOM' }
+
+  /**
+   * An ordered list of other products, variants or UOMs (Related products,
+   * Upsell / Recommended alternative) with Up / Down / Remove, and a search to
+   * add one. `exclude`: this product's SKU, whose own variants and UOMs are never offered.
+   */
+  function linkedList(list, { exclude = '', disabled = state.readOnly, onChange = changed } = {}) {
+    const holder = el('div')
+    const redraw = () => {
+      draw()
+      onChange()
+    }
+    const draw = () => fill(
+      holder,
+      ...list.map((item, i) =>
+        el(
+          'div',
+          { class: 'fpim-row' },
+          item.thumb ? el('img', { src: item.thumb, alt: '', class: 'fpim-link-thumb' }) : el('span', { class: 'fpim-link-thumb', title: 'No picture yet' }, icon('fa-picture-o')),
+          el(
+            'div',
+            { class: 'fpim-grow' },
+            el('div', {}, item.missing ? el('span', { class: 'text-danger' }, 'Not in the PIM any more') : item.title),
+            el('div', { class: 'text-muted', style: 'font-size:12px' }, el('span', { class: 'fpim-sku' }, item.sku), ` · ${LEVEL_NAME[item.level] ?? item.level}`, item.level !== 'product' && item.productSku ? ` of ${item.productSku}` : '', item.eol ? ' · EOL' : '')
+          ),
+          disabled
+            ? null
+            : el(
+                'div',
+                { class: 'btn-group fpim-row-tools' },
+                iconButton('fa-arrow-up', 'Move up', () => move(list, i, -1) && redraw(), { disabled: i === 0 }),
+                iconButton('fa-arrow-down', 'Move down', () => move(list, i, 1) && redraw(), { disabled: i === list.length - 1 }),
+                iconButton('fa-times', 'Remove', () => { list.splice(i, 1); redraw() })
+              )
+        )
+      ),
+      disabled || list.length >= 30
+        ? null
+        : picker({
+            kind: 'items',
+            query: exclude ? `&exclude=${encodeURIComponent(exclude)}` : '',
+            placeholder: 'Type a SKU or title to add a product, variant or UOM',
+            label: (x) => [x.title, el('span', { class: 'text-muted' }, ` ${x.sku} · ${LEVEL_NAME[x.level] ?? x.level}`)],
+            onPick: (x) => {
+              if (!list.some((y) => y.level === x.level && y.sku === x.sku)) list.push(x)
+              redraw()
+            },
+          })
+    )
+    draw()
+    return holder
+  }
+
   function rowInput(row, key, attrs = {}) {
     const input = el('input', { class: `form-control ${attrs.class ?? ''}`, placeholder: attrs.placeholder, type: attrs.type, min: attrs.min, disabled: state.readOnly || attrs.disabled, value: row[key] ?? '' })
     input.addEventListener('input', () => {
@@ -1297,7 +1359,7 @@
 
   function mainColumn(p) {
     const variants = variantsSection()
-    const sections = [productSection(), contentSection(), moreFieldsSection(p), mediaSection(), classificationSection(), channelsSection(p)].filter(Boolean)
+    const sections = [productSection(), contentSection(), moreFieldsSection(p), mediaSection(), classificationSection(), relatedSection(), channelsSection(p)].filter(Boolean)
     const all = [...sections, variants]
     return el('div', {}, jumpLinks(all), sections, variants)
   }
@@ -1529,6 +1591,16 @@
       },
     })
     return section('Classification', field('Categories', categories, 'Where it sits on the website; pick the most specific', 8), field('Tags', tags, null, 4))
+  }
+
+  function relatedSection() {
+    const d = state.draft
+    const sku = state.data.product.sku
+    return section(
+      'Related products',
+      field('Related products', linkedList(d.relatedProducts, { exclude: sku }), 'Other products, variants or UOMs shown on this product page, in this order', 6, { top: true }),
+      field('Upsell / Recommended alternative', linkedList(d.upsells, { exclude: sku }), 'A better or bigger option, or what to buy instead', 6, { top: true })
+    )
   }
 
   /** A Google or eBay category: the product's own, or the one it inherits from its categories. */
@@ -2811,6 +2883,12 @@
     ['categories-replace', 'Replace categories'],
     ['tags-add', 'Add tags'],
     ['tags-remove', 'Remove tags'],
+    ['related-add', 'Add related products'],
+    ['related-remove', 'Remove related products'],
+    ['related-replace', 'Replace related products'],
+    ['upsells-add', 'Add upsells / alternatives'],
+    ['upsells-remove', 'Remove upsells / alternatives'],
+    ['upsells-replace', 'Replace upsells / alternatives'],
     ['google', 'Set Google category'],
     ['ebay', 'Set eBay category'],
     ['replace', 'Find and replace text'],
@@ -2826,6 +2904,7 @@
       button('Channels', () => open('channels')),
       menuButton('Categories', pick(['categories-add', 'categories-remove', 'categories-replace']), 'btn-default', { up: true }),
       menuButton('Tags', pick(['tags-add', 'tags-remove']), 'btn-default', { up: true }),
+      menuButton('Related', pick(['related-add', 'related-remove', 'related-replace', 'upsells-add', 'upsells-remove', 'upsells-replace']), 'btn-default', { up: true }),
       menuButton('Google / eBay', pick(['google', 'ebay']), 'btn-default', { up: true }),
       button('Find & replace', () => open('replace')),
     ]
@@ -3027,6 +3106,23 @@
         read: () => {
           if (!find.value) throw new Error('Type what to find.')
           return { action: 'replace', params: { find: find.value, replace: replace.value } }
+        },
+      }
+    }
+    if (/^(related|upsells)-/.test(action)) {
+      const [kind, mode] = action.split('-')
+      const chosen = []
+      const node = el(
+        'div',
+        { class: 'fpim-grow' },
+        linkedList(chosen, { disabled: false, onChange: () => node.dispatchEvent(new Event('input', { bubbles: true })) }),
+        el('span', { class: 'fpim-help' }, mode === 'replace' ? 'Replacing with nothing empties the list. ' : '', 'A parent never gets its own variants or UOMs.')
+      )
+      return {
+        node,
+        read: () => {
+          if (!chosen.length && mode !== 'replace') throw new Error('Pick something first.')
+          return { action: 'links', params: { field: kind === 'related' ? 'relatedProducts' : 'upsells', mode, items: chosen.map(({ level, sku }) => ({ level, sku })) } }
         },
       }
     }
@@ -6751,7 +6847,7 @@
   /**
    * Like tools.farla.pro's AI Imaging: find a product, pick one of its
    * pictures, fix it (a white background, a cut-out…), compare, then use it in
-   * place of the old one or as an extra. The old file is kept in the library.
+   * place of the old one (the old file is deleted) or as an extra.
    */
   function aiPictures(ctx) {
     const img = ctx.status.images
@@ -6854,7 +6950,7 @@
           picked = null
           result = null
           paintGallery()
-          fill(work, el('div', { class: 'alert alert-success mt10' }, mode === 'add' ? 'Added next to the old picture.' : 'Saved in place of the old picture. The old file stays in the media library.'))
+          fill(work, el('div', { class: 'alert alert-success mt10' }, mode === 'add' ? 'Added next to the old picture.' : 'Saved in place of the old picture. The old picture is deleted.'))
         } catch (error) {
           fill(out, el('div', { class: 'alert alert-danger' }, error.message))
         }
@@ -7083,7 +7179,7 @@
       try {
         const r = await request('POST', adminPath('/ai/pictures/crop'), { json: { sku, fileId, box, square: square.checked, margin: Number(margin.value), mode } })
         d.close()
-        toast('success', mode === 'add' ? 'Cropped copy added after the picture.' : 'Cropped. The old file stays in the media library.')
+        toast('success', mode === 'add' ? 'Cropped copy added after the picture.' : 'Cropped. The old picture is deleted.')
         onSaved?.(r, mode)
       } catch (error) {
         fill(out, el('div', { class: 'alert alert-danger' }, error.message))
