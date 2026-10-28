@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 08 - Website Order Summary
 // @namespace    farla-office-scripts
-// @version      1.1.0
+// @version      1.2.0
 // @description  Turns the website's ORDER DATA notes on a TradePeg sales order into a summary box
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
@@ -199,7 +199,12 @@ ${B} a{color:#0369a1}
     return !!a && !!b && keys.every((k) => (a[k] || '') === (b[k] || ''));
   }
 
-  function render(raw) {
+  // The website's one-line "Web reference: … Payment: …" note for this order, if there is one.
+  function findSummaryNote(notes, ref) {
+    return notes.find((n) => /^Web reference:/.test(n.text) && (!ref || n.text.indexOf(ref) !== -1)) || null;
+  }
+
+  function render(raw, summary) {
     const used = new Set();
     const o = tracked(raw, used, '');
     const c = o.customer || {};
@@ -234,6 +239,7 @@ ${B} a{color:#0369a1}
       ['Email', c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ''],
       ['Placed by', esc(c.placed_by)],
       ['Checkout', `${c.guest ? 'Guest' : 'Account'} · ${c.signed_in ? 'signed in' : 'not signed in'}`],
+      ['New account', summary && /Account opened for this order/i.test(summary.text) ? 'Opened for this order' : ''],
       ['Price list', esc(c.pricelist_name)],
       ['Tax group', esc([c.tax_group, c.currency].filter(Boolean).join(' · '))],
       ['Purchase order', o.purchase_order ? esc(o.purchase_order) : '<span class="f8-m">None</span>'],
@@ -332,7 +338,7 @@ ${B} a{color:#0369a1}
     };
   }
 
-  // Fold the raw JSON parts down to one line; click to show them again.
+  // Fold the website's notes down to one line; click to show them again.
   function foldNotes(notes) {
     notes.forEach(({ area, text }) => {
       if (area.querySelector('.farla08-folded')) return;
@@ -340,7 +346,7 @@ ${B} a{color:#0369a1}
       const kids = Array.from(area.childNodes).filter((n) => !(n.classList && n.classList.contains('infoRow')));
       const label = document.createElement('div');
       label.className = 'farla08-folded';
-      label.textContent = `Order data part ${m ? m[1] + '/' + m[2] : ''} — shown in the Website order box (click to show)`;
+      label.textContent = `${m ? `Order data part ${m[1]}/${m[2]}` : 'Order summary'} — shown in the Website order box (click to show)`;
       label.addEventListener('click', () => {
         const hidden = label.dataset.open !== '1';
         label.dataset.open = hidden ? '1' : '0';
@@ -374,8 +380,10 @@ ${B} a{color:#0369a1}
     const found = findOrder(notes);
     if (!found) { if (existing) existing.remove(); lastKey = ''; return; }
 
-    const key = location.pathname + '|' + found.notes.map((n) => n.text).join('');
-    if (existing && key === lastKey && existing.isConnected) { foldNotes(found.notes); return; }
+    const summary = found.data ? findSummaryNote(notes, found.data.web_reference) : null;
+    const toFold = summary ? found.notes.concat(summary) : found.notes;
+    const key = location.pathname + '|' + toFold.map((n) => n.text).join('');
+    if (existing && key === lastKey && existing.isConnected) { foldNotes(toFold); return; }
 
     addStyle();
     const box = existing || document.createElement('div');
@@ -384,12 +392,12 @@ ${B} a{color:#0369a1}
     box.className = 'panel panel-default fluid no-print';
     const out = found.error
       ? { pills: '', body: `<div class="f8-sec f8-m">${esc(found.error)}</div>` }
-      : render(found.data);
+      : render(found.data, summary);
     box.innerHTML = `<div class="panel-heading">Website order<div class="f8-pills">${out.pills}</div></div>
       <div class="panel-body">${out.body}</div>`;
     if (!existing && !placeBox(box)) return;
     lastKey = key;
-    if (!found.error) foldNotes(found.notes);
+    if (!found.error) foldNotes(toFold);
   }
 
   document.addEventListener('click', (e) => {
