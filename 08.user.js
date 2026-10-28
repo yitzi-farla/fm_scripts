@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 08 - Website Order Summary
 // @namespace    farla-office-scripts
-// @version      1.2.0
+// @version      1.3.0
 // @description  Turns the website's ORDER DATA notes on a TradePeg sales order into a summary box
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
@@ -19,6 +19,11 @@
 
   const BOX_ID = 'farla08-web-order';
   const PART_RE = /^\[(\d+)\/(\d+)\]\s?/;
+  // TradePeg's dispatch mode codes, as the gateway sends them (sales-orders.mjs).
+  const DISPATCH = {
+    0: { label: 'Split', hint: '— send each part as it is ready', cls: 'split' },
+    1: { label: 'Complete', hint: '— send everything together', cls: 'complete' },
+  };
 
   const esc = (v) => String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -37,6 +42,8 @@ ${B} .f8-pill{font-size:10.5px;font-weight:600;border-radius:999px;padding:1px 8
 ${B} .f8-pill.ok{background:#dcfce7;color:#166534}
 ${B} .f8-pill.warn{background:#fef3c7;color:#92400e}
 ${B} .f8-pill.bad{background:#fee2e2;color:#991b1b}
+${B} .f8-pill.split{background:#ede9fe;color:#5b21b6}
+${B} .f8-pill.complete{background:#e0f2fe;color:#075985}
 ${B} .f8-hero{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
 ${B} .f8-ref{font:600 12.5px/1.3 Consolas,"Courier New",monospace;word-break:break-all}
 ${B} .f8-when{color:#475569;font-size:11px;margin-top:2px}
@@ -223,6 +230,8 @@ ${B} a{color:#0369a1}
     else if (p.awaiting_funds) pills.push('<span class="f8-pill warn">Awaiting funds</span>');
     else pills.push('<span class="f8-pill bad">Not paid</span>');
     pills.push(c.guest ? '<span class="f8-pill">Guest</span>' : '<span class="f8-pill">Account</span>');
+    const dispatch = DISPATCH[String(d.dispatch_mode)];
+    if (dispatch) pills.push(`<span class="f8-pill ${dispatch.cls}">${dispatch.label}</span>`);
     if (ck.channel) pills.push(`<span class="f8-pill">${esc(String(ck.channel).toUpperCase())}</span>`);
 
     const hero = `
@@ -268,7 +277,7 @@ ${B} a{color:#0369a1}
       ['Arrangement', esc(cap(words(d.arrangement)))],
       ['Dispatch from', esc(date(d.dispatch_start))],
       ['Delivery due', esc(date(d.delivery_due))],
-      ['Dispatch mode', esc(d.dispatch_mode)],
+      ['Dispatch', dispatch ? `${dispatch.label} <span class="f8-m">${dispatch.hint}</span>` : esc(d.dispatch_mode)],
       ['Method', esc(ck.delivery_method_id)],
     ]) + shipments + unscheduled);
 
