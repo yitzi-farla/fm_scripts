@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 08 - Website Order Summary
 // @namespace    farla-office-scripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Turns the website's ORDER DATA notes on a TradePeg sales order into a summary box
 // @match        https://farla2.tradepeg.net/*
 // @grant        none
@@ -11,7 +11,7 @@
 
 // The website writes each order into the SO's notes as "[1/2] ORDER DATA {json…",
 // "[2/2] …rest of json". This joins the parts, reads the JSON and shows it as a
-// box above the order. The raw parts are folded down to one line in the notes.
+// box under the Notes. The raw parts are folded down to one line in the notes.
 (function () {
   'use strict';
 
@@ -257,12 +257,11 @@
     });
   }
 
+  // Under the Notes panel. Outside #notes-holder, which TradePeg refills on Refresh.
   function placeBox(box) {
-    const content = document.querySelector('.page-content');
-    const anchor = content && content.querySelector('.panel.panel-customer');
-    if (anchor) anchor.parentNode.insertBefore(box, anchor);
-    else if (content) content.prepend(box);
-    else return false;
+    const notes = document.getElementById('notes-holder');
+    if (!notes) return false;
+    notes.after(box);
     return true;
   }
 
