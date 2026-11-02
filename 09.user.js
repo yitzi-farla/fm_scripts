@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Farla 09 - Forecast Planner
 // @namespace    farla-office-scripts
-// @version      1.8.1
-// @description  Adds full-unit, months-sold and days-since-last-sale filters, presets of every choice (with a default and updating), a Columns menu and drag-to-resize columns that are remembered, and opens a product's details as a modal, in TradePeg's forecast planner.
+// @version      1.8.2
+// @description  Adds full-unit, months-sold and days-since-last-sale filters, presets of every choice (with updating), a Columns menu and drag-to-resize columns that are remembered, and opens a product's details as a modal, in TradePeg's forecast planner.
 // @match        https://cdn-glb-iframe.tradepeg.com/reports/forecast-planner*
 // @grant        none
 // @run-at       document-start
@@ -24,10 +24,9 @@
  *    last run, this script's filters, the table toolbar and summary card, and
  *    the columns. The app fills its own fields from the page URL when it
  *    starts (that is how TradePeg opens it with filters), and only then, so
- *    applying a preset puts its parameters in the URL and reloads the report;
- *    the default preset goes in the URL before the app starts. The rest of
- *    the preset is set back once the page is up. With no preset everything
- *    starts as TradePeg opens it.
+ *    applying a preset puts its parameters in the URL and reloads the report.
+ *    The rest of the preset is set back once the page is up. Otherwise every
+ *    page load starts as TradePeg opens it.
  *  - The extra filters drop items from the response before the app sees it,
  *    so the counts, totals, CSV and Generate PO all follow them.
  *
@@ -125,7 +124,7 @@
   if (!localStorage.getItem(SEEDED_KEY)) {
     const list = load(SAVED_KEY, [])
     for (const preset of SEED_PRESETS) {
-      if (!list.some((p) => p.name === preset.name)) list.push({ ...preset, isDefault: false, savedAt: new Date().toISOString() })
+      if (!list.some((p) => p.name === preset.name)) list.push({ ...preset, savedAt: new Date().toISOString() })
     }
     list.sort((a, b) => a.name.localeCompare(b.name))
     store(SAVED_KEY, list)
@@ -142,8 +141,6 @@
   let replayUntil = 0
   /** The table toolbar and summary-card choices from a preset, set once the next run has drawn. */
   let pendingView = null
-  /** The preset this page started with, if it still has contacts known only by name: looked up once the app has signed in. */
-  let pendingLookup = null
   let lastStats = null
   /** The signed-in user's API token, from the app's own requests; for looking contacts up. */
   let auth = null
@@ -162,7 +159,6 @@
   // ---- presets: storage and the default ------------------------------
 
   const savedFilters = () => load(SAVED_KEY, [])
-  const defaultFilter = () => savedFilters().find((f) => f.isDefault) ?? null
 
   /** The URL that opens the report with these parameters and nothing else (bar the sign-in). */
   function urlFor(params) {
@@ -173,8 +169,8 @@
   }
 
   /**
-   * Each page load starts from the preset just applied (it reloaded the page
-   * to get here), else the default preset, else blank. Its parameters go in
+   * A page load that follows Apply (which reloaded the page to get here)
+   * starts from that preset; any other starts blank. Its parameters go in
    * the URL before the app reads it, so the app's own fields start filled
    * with them; nothing is run or sent for it. The rest is set as the page
    * comes up.
@@ -182,7 +178,7 @@
   function startFromPreset() {
     const applying = sessionStorage.getItem(APPLY_KEY)
     sessionStorage.removeItem(APPLY_KEY)
-    const entry = (applying && savedFilters().find((f) => f.name === applying)) || defaultFilter()
+    const entry = applying && savedFilters().find((f) => f.name === applying)
     if (!entry) return
     startedWith = entry
     settings = { ...DEFAULTS, ...entry.settings }
@@ -192,7 +188,6 @@
     store(COLUMNS_KEY, [...hiddenColumns])
     store(WIDTHS_KEY, columnWidths)
     pendingView = entry.view ?? null
-    pendingLookup = entry.resolveContacts?.length ? entry : null
     history.replaceState(history.state, '', urlFor(entry.params))
   }
 
@@ -208,7 +203,6 @@
       try {
         auth = new Headers((init && init.headers) || (isRequest ? input.headers : undefined)).get('authorization') || auth
       } catch {}
-      if (auth && pendingLookup) lookUpThenRefill()
     }
 
     if (url.startsWith(API_URL) && new URL(url).pathname === RUN_PATH && method === 'POST') return handleRun(input, init)
@@ -259,21 +253,6 @@
   }
 
   const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
-
-  /**
-   * A default preset can start the page before its named contacts were ever
-   * looked up (that needs the app signed in). Once it is, look them up and
-   * reload once so they are in the app's fields too.
-   */
-  function lookUpThenRefill() {
-    const preset = pendingLookup
-    pendingLookup = null
-    resolveContacts(preset, auth).then((updated) => {
-      if (!updated) return
-      sessionStorage.setItem(APPLY_KEY, updated.name)
-      location.replace(urlFor(updated.params))
-    })
-  }
 
   /**
    * Every contact whose name contains one of the preset's names (ignoring
@@ -439,7 +418,6 @@
     .ffx-btn { height: 34px; padding: 0 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; font-size: 12px; font-weight: 500; color: #334155; cursor: pointer; transition: background-color .15s ease; }
     .ffx-btn:hover:not(:disabled) { background: #f8fafc; }
     .ffx-btn:disabled { opacity: .5; cursor: not-allowed; }
-    .ffx-btn[aria-pressed="true"] { border-color: #03c160; color: #047857; background: #ecfdf5; }
     .ffx-btn:focus-visible, .ffx-cols-menu :focus-visible, .ffx-cols-btn:focus-visible { outline: 2px solid #6366f1; outline-offset: 1px; }
 
     .ffx-cols { position: relative; display: inline-flex; }
@@ -502,8 +480,6 @@
       <select data-saved class="input-class rounded px-3 border" title="Presets"></select>
       <button type="button" class="ffx-btn" data-act="apply" title="Fill every field with this preset; nothing runs until you click Run forecast">Apply</button>
       <button type="button" class="ffx-btn" data-act="update" title="Save everything chosen now over this preset: the report's fields (as of the last run), the extra filters, the table toolbar and summary card, and the columns">Update</button>
-      <button type="button" class="ffx-btn" data-act="default" title="Start the page with this preset" aria-pressed="false">Make default</button>
-      <button type="button" class="ffx-btn" data-act="delete">Delete</button>
       <span class="ffx-sep"></span>
       <input data-name class="input-class rounded px-3 border" placeholder="Name a new preset" type="text" autocomplete="off">
       <button type="button" class="ffx-btn" data-act="save">Save as new preset</button>
@@ -551,7 +527,7 @@
     for (const f of savedFilters()) {
       const option = document.createElement('option')
       option.value = f.name
-      option.textContent = f.isDefault ? `${f.name} (default)` : f.name
+      option.textContent = f.name
       select.append(option)
     }
     select.value = current
@@ -563,11 +539,7 @@
     const el = foot()
     if (!el) return
     const entry = savedFilters().find((f) => f.name === selectedName())
-    for (const act of ['apply', 'update', 'default', 'delete']) el.querySelector(`[data-act=${act}]`).disabled = !entry
-    const def = el.querySelector('[data-act=default]')
-    def.textContent = entry?.isDefault ? 'Default' : 'Make default'
-    def.setAttribute('aria-pressed', String(!!entry?.isDefault))
-    def.title = entry?.isDefault ? 'This preset starts the page. Click to stop that' : 'Start the page with this preset'
+    for (const act of ['apply', 'update']) el.querySelector(`[data-act=${act}]`).disabled = !entry
   }
 
   function message(text) {
@@ -646,7 +618,6 @@
       columnWidths: { ...columnWidths },
       view: readView(),
       ...(previous?.resolveContacts ? { resolveContacts: previous.resolveContacts } : {}),
-      isDefault: !!previous?.isDefault,
       savedAt: new Date().toISOString(),
     }
   }
@@ -825,17 +796,6 @@
     })
   }
 
-  function toggleDefault() {
-    const name = selectedName()
-    const list = savedFilters()
-    const entry = list.find((f) => f.name === name)
-    if (!entry) return
-    const makeDefault = !entry.isDefault
-    for (const f of list) f.isDefault = makeDefault && f.name === name
-    writeSaved(list, name)
-    message(makeDefault ? `"${name}" now starts the page` : `No default preset; the page starts as TradePeg opens it`)
-  }
-
   /** Reloads the report with the preset in the URL, so the app fills its own fields with it. */
   async function applySaved() {
     const name = selectedName()
@@ -847,7 +807,7 @@
     location.replace(urlFor(entry.params))
   }
 
-  /** After a preset starts the page: its name in the box, and a run if the app doesn't start one. */
+  /** After Apply has reloaded the page: the preset's name in the box and a note to check and run. */
   function finishStart() {
     if (!startedWith) return
     const select = foot()?.querySelector('[data-saved]')
@@ -859,13 +819,6 @@
     sessionStorage.removeItem('farlaForecast.note')
     message(`"${startedWith.name}" filled in${note ? `. ${note}` : ''}. Check the fields, then Run forecast`)
     startedWith = null
-  }
-
-  function deleteSaved() {
-    const name = selectedName()
-    if (!name || !confirm(`Delete the preset "${name}"?`)) return
-    writeSaved(savedFilters().filter((f) => f.name !== name), '')
-    message(`Deleted "${name}"`)
   }
 
   function renderStatus() {
@@ -1236,8 +1189,6 @@
       el.querySelector('[data-act=save]').addEventListener('click', saveCurrent)
       el.querySelector('[data-act=apply]').addEventListener('click', applySaved)
       el.querySelector('[data-act=update]').addEventListener('click', updateSaved)
-      el.querySelector('[data-act=default]').addEventListener('click', toggleDefault)
-      el.querySelector('[data-act=delete]').addEventListener('click', deleteSaved)
       el.querySelector('[data-saved]').addEventListener('change', () => { renderSavedButtons(); message('') })
       runBar.prepend(el)
       renderSaved()
