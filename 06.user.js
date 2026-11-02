@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.20.0
+// @version      3.21.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -513,16 +513,9 @@
     signingIn ??= (async () => {
       log('signing in to the PIM through TradePeg')
       const { challengeId, contactId, note } = await send('POST', '/api/pim/signin/challenge', { json: {} })
-      const posted = await fetch(`/wapp/${location.pathname.split('/')[2] || 'en-gb'}/io/post/`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams({ concept: 'doc-note', baseType: 'CONTACTS', baseId: contactId, note }),
-      })
-      if (!posted.ok) throw new Error(`Could not sign in to the PIM: TradePeg answered ${posted.status}`)
+      await postSigninNote(contactId, note)
       const signedIn = await send('POST', '/api/pim/signin/verify', { json: { challengeId } })
-      // The PIM deletes the comment too; as its author, so can we.
-      if (signedIn.noteId) void fetch(`/wapp/${location.pathname.split('/')[2] || 'en-gb'}/io/post/legacy/?concept=delete-note&noteId=${signedIn.noteId}`, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(() => {})
+      deleteSigninNote(signedIn.noteId)
       GM_setValue(SIGNIN_KEY, { token: signedIn.token, expiresAt: signedIn.expiresAt, user: tpUser() || signedIn.name, name: signedIn.name })
       // A new token may be allowed to save: the editor is no longer locked by the old one's 403.
       state.readOnly = false
@@ -530,6 +523,57 @@
       return signedIn.token
     })().finally(() => { signingIn = null })
     return signingIn
+  }
+
+  const tpPost = () => `/wapp/${location.pathname.split('/')[2] || 'en-gb'}/io/post/`
+
+  /** The sign-in code, as a comment by whoever is signed in to TradePeg here. */
+  async function postSigninNote(contactId, note) {
+    const posted = await fetch(tpPost(), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: new URLSearchParams({ concept: 'doc-note', baseType: 'CONTACTS', baseId: contactId, note }),
+    })
+    if (!posted.ok) throw new Error(`Could not sign in to the PIM: TradePeg answered ${posted.status}`)
+  }
+
+  /** The PIM deletes the comment too; as its author, so can we. */
+  function deleteSigninNote(noteId) {
+    if (noteId) void fetch(`${tpPost()}legacy/?concept=delete-note&noteId=${noteId}`, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }).catch(() => {})
+  }
+
+  /**
+   * Sign in with TradePeg for an AI app (ChatGPT, Claude) connecting to the
+   * PIM's MCP: its sign-in page opens TradePeg at #pim-oauth/<challenge>
+   * (repos/pim src/pim/mcp-oauth.js). Once the user allows it, the same
+   * comment proof as signIn() tells the PIM who they are, and the app's page
+   * carries on by itself.
+   */
+  let oauthDone = false
+  async function approveOauth() {
+    const m = /^#pim-oauth\/([0-9a-f]{32})$/.exec(location.hash)
+    // Only once TradePeg shows who is signed in: on its login page there is nobody to post as.
+    if (!m || oauthDone || !tpUser()) return
+    oauthDone = true
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    const id = m[1]
+    try {
+      const info = await send('GET', `/oauth/tradepeg/${id}`)
+      const who = tpUser() || 'you'
+      const ok = confirm(
+        `Allow ${info.client} to read and edit the Farla PIM as ${who}?\n\n` +
+          `It goes back to ${info.returnsTo}.\n\n` +
+          'Only allow this if you clicked "Sign in with TradePeg" yourself just now.'
+      )
+      if (!ok) return toast('info', 'Not allowed. Nothing was shared.')
+      await postSigninNote(info.contactId, info.note)
+      const done = await send('POST', `/oauth/tradepeg/${id}/verify`, { json: {} })
+      deleteSigninNote(done.noteId)
+      toast('success', `${done.client} is signed in as ${done.name}. Go back to it; this tab can be closed.`)
+    } catch (error) {
+      toast('danger', error.message)
+    }
   }
 
   /** One call to the PIM with this token (none for sign-in itself). */
@@ -8177,6 +8221,7 @@
       installMenu()
       installPartsToolbar()
       routePage()
+      void approveOauth()
     } catch (error) {
       console.error('[Farla PIM]', VERSION, 'could not add the tab', error)
     }
