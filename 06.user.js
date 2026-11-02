@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Farla 06 - TradePeg PIM
 // @namespace    farla-office-scripts
-// @version      3.19.0
+// @version      3.20.0
 // @description  The Farla PIM inside TradePeg: a PIM section in the menu (parents, categories, import, settings with TradePeg sync and export), each part's VARPAR opening its parent, website pictures in each part's Images tab, and, for parts ticked in TradePeg's list, "VARPAR / SOLOPAR" and "Edit in PIM". No need to open Strapi.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
@@ -4512,10 +4512,59 @@
     )
     if (hasToken()) {
       void channelsSettings(channels, alive)
+      const guide = el('div')
       const backups = el('div')
-      content.append(backups)
+      content.append(guide, backups)
+      void mcpGuidePanel(guide, alive)
       void backupsPanel(backups, alive)
     }
+  }
+
+  /**
+   * The rules an AI follows when it works in the PIM over MCP (ChatGPT, Claude),
+   * sent to every client when it connects (repos/pim src/pim/mcp-guide.js).
+   */
+  async function mcpGuidePanel(holder, alive) {
+    let g
+    try {
+      g = await request('GET', adminPath('/mcp-guide'))
+    } catch (error) {
+      const box = el('div', { class: 'col-md-12' })
+      toolError(box, error, () => mcpGuidePanel(holder, alive))
+      return fill(holder, tpPanel('AI rules (MCP)', null, el('div', { class: 'formRow fluid' }, box)))
+    }
+    if (!alive()) return
+    const text = el('textarea', { class: 'form-control fpim-mono', rows: 24, oninput: () => sync() })
+    text.value = g.guide
+    const save = async (next) => {
+      try {
+        const r = await request('PUT', adminPath('/mcp-guide'), { json: { text: next } })
+        g.guide = r.guide
+        text.value = r.guide
+        sync()
+        toast('success', next ? 'AI rules saved.' : 'Back to the default rules.')
+      } catch (error) {
+        toast('danger', error.message)
+      }
+    }
+    const undoBtn = headButton([icon('fa-undo'), ' Undo changes'], () => { text.value = g.guide; sync() }, 'btn-default')
+    const defaultBtn = headButton('Default rules', () => { if (confirm('Put back the default AI rules for everyone?')) void save('') }, 'btn-default')
+    const saveBtn = headButton([icon('fa-check'), ' Save rules'], () => void save(text.value), 'btn-info')
+    function sync() {
+      const changed = text.value !== g.guide
+      undoBtn.style.display = changed ? '' : 'none'
+      saveBtn.classList.toggle('disabled', !changed)
+      defaultBtn.classList.toggle('disabled', g.guide === g.default)
+    }
+    sync()
+    fill(
+      holder,
+      tpPanel(
+        'AI rules (MCP)',
+        el('span', null, undoBtn, ' ', defaultBtn, ' ', saveBtn),
+        el('div', { class: 'formRow fluid' }, field('Rules', text, 'What ChatGPT and Claude must follow when they work in the PIM. Sent every time one connects.', 12), el('div', { class: 'clear' }))
+      )
+    )
   }
 
   /**
