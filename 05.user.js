@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Farla 05
 // @namespace    farla-office-scripts
-// @version      1.5.3
-// @description  Adds a TradePeg inventory report showing SELECT items with no vendor price or a blank vendor price.
+// @version      1.6.0
+// @description  Adds TradePeg inventory reports: SELECT items missing a vendor price, and SELECT items with no Backorder Timeline.
 // @match        https://farla2.tradepeg.net/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      tpresourcesuk.blob.core.windows.net
+// @connect      api-prod.tradepeg.com
+// @connect      cdn-glb-iframe.tradepeg.com
+// @connect      blob.core.windows.net
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/05.user.js
 // @downloadURL  https://raw.githubusercontent.com/yitzi-farla/fm_scripts/main/05.user.js
@@ -20,6 +23,11 @@
   const VENDOR_TEMPLATE_ID = '13'
   const VENDOR_EXPORT_TITLE = 'vendor pricing export export'
   const PAGE_SIZE = 2000
+  // Item specifications live in TradePeg's iframe app: its own bearer token
+  // (read off the specifications screen) and its own Pusher channels.
+  const TP_API = 'https://api-prod.tradepeg.com'
+  const IFRAME_ORIGIN = 'https://cdn-glb-iframe.tradepeg.com'
+  const BACKORDER_COLUMN = 'Backorder Timeline'
 
   GM_addStyle(`
     #${REPORT_ID} .fsv-state { padding: 28px 15px; text-align: center; color: #777; }
@@ -512,21 +520,177 @@
     return bySku
   }
 
+  function gmRequest({ method = 'GET', url, headers = {}, data }) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method,
+        url,
+        headers,
+        data,
+        anonymous: true,
+        timeout: 120000,
+        onload: response => resolve({ status: response.status, text: response.responseText || '' }),
+        onerror: () => reject(new Error(`Could not reach ${new URL(url).host}`)),
+        ontimeout: () => reject(new Error(`${new URL(url).host} timed out`)),
+      })
+    })
+  }
+
+  async function specsApi() {
+    const page = await tpFetch(wapp('/inventory/products/manage/specifications'))
+    const doc = new DOMParser().parseFromString(await page.text(), 'text/html')
+    const iframeUrl = [...doc.querySelectorAll('iframe[src]')]
+      .map(frame => frame.getAttribute('src'))
+      .find(src => src.includes('cdn-glb-iframe.tradepeg.com'))
+    if (!iframeUrl) throw new Error('Could not find the TradePeg specifications screen.')
+    const token = new URL(iframeUrl, location.href).searchParams.get('token')
+    if (!token) throw new Error('TradePeg specifications screen carried no token.')
+
+    // Opening the iframe first mirrors what the browser does; harmless if it fails.
+    try { await gmRequest({ url: iframeUrl }) } catch {}
+
+    const headers = { Authorization: `Bearer ${token}`, Accept: '*/*', Origin: IFRAME_ORIGIN, Referer: `${IFRAME_ORIGIN}/` }
+    const me = await gmRequest({ url: `${TP_API}/user/me`, headers })
+    if (me.status !== 200) throw new Error(`TradePeg specifications API refused the token (${me.status}).`)
+    const pusher = JSON.parse(me.text)?.data?.settings?.pusher || {}
+    const config = { channels: pusher.channels || [], key: pusher.config?.key, cluster: pusher.config?.cluster }
+    if (!config.channels.length || !config.key || !config.cluster) {
+      throw new Error('TradePeg specifications API returned no export notifications config.')
+    }
+    return { headers, config }
+  }
+
+  function backorderIndex(csvText) {
+    const rows = parseCsv(csvText)
+    if (!rows.length) return null
+    const headers = rows[0]
+    const normalized = headers.map(normalizeHeader)
+    const timelineIndex = normalized.indexOf(normalizeHeader(BACKORDER_COLUMN))
+    const skuIndex = pickColumn(headers, ['Part code', 'Part Code', 'SKU', 'Reference', 'Identifier'])
+    if (timelineIndex < 0 || skuIndex < 0) return null
+
+    const bySku = new Map()
+    for (const row of rows.slice(1)) {
+      const sku = String(row[skuIndex] || '').trim()
+      if (!sku) continue
+      const key = canonicalSku(sku)
+      const value = String(row[timelineIndex] || '').trim()
+      // Keep a non-blank value if a SKU appears twice.
+      if (!bySku.get(key)) bySku.set(key, value)
+    }
+    return bySku
+  }
+
+  // Exports from the iframe app give no job id, so any file announced on its
+  // channels could be someone else's. Each one is downloaded and kept only if
+  // it is the specifications export (has Part code + Backorder Timeline).
+  function fetchBackorderTimelines(setStatus) {
+    return specsApi().then(({ headers, config }) => new Promise((resolve, reject) => {
+      const ws = new WebSocket(`wss://ws-${config.cluster}.pusher.com/app/${config.key}?protocol=7&client=js&version=8.4.0`)
+      const subscribed = new Set()
+      const tried = new Set()
+      let triggered = false
+      let done = false
+      const timeout = setTimeout(() => finish(reject, new Error('Timed out waiting for the Item Specifications export.')), 300000)
+
+      function finish(fn, value) {
+        if (done) return
+        done = true
+        clearTimeout(timeout)
+        try { ws.close() } catch {}
+        fn(value)
+      }
+
+      async function trigger() {
+        if (triggered) return
+        triggered = true
+        try {
+          setStatus('Starting Item Specifications export…')
+          const response = await gmRequest({
+            method: 'POST',
+            url: `${TP_API}/inventory/catalog/v1/specifications/export`,
+            headers,
+            data: '',
+          })
+          if (response.status >= 300) {
+            throw new Error(`TradePeg refused the Item Specifications export (${response.status}).`)
+          }
+          setStatus('Item Specifications export queued…')
+        } catch (error) {
+          finish(reject, error)
+        }
+      }
+
+      async function tryFile(url) {
+        if (tried.has(url)) return
+        tried.add(url)
+        try {
+          setStatus('Downloading Item Specifications…')
+          const index = backorderIndex(await gmGetText(url, 'Item Specifications'))
+          if (index) finish(resolve, index)
+          else {
+            log('ignored a file that is not the specifications export', url)
+            setStatus('Item Specifications export queued…')
+          }
+        } catch (error) {
+          log('could not read announced file', url, error)
+        }
+      }
+
+      ws.onerror = () => finish(reject, new Error('Could not connect to TradePeg export notifications.'))
+      ws.onmessage = event => {
+        let msg
+        try { msg = JSON.parse(event.data) } catch { return }
+        let data = msg.data
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data) } catch {}
+        }
+        if (msg.event === 'pusher:connection_established') {
+          for (const channel of config.channels) ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel } }))
+          return
+        }
+        if (msg.event === 'pusher_internal:subscription_succeeded') {
+          subscribed.add(msg.channel)
+          if (config.channels.every(ch => subscribed.has(ch))) void trigger()
+          return
+        }
+        if (msg.event === 'pusher:error') {
+          finish(reject, new Error(`TradePeg export notifications: ${JSON.stringify(data)}`))
+          return
+        }
+        if (msg.event === 'file_progress' && triggered && data && typeof data === 'object' && data.url) {
+          void tryFile(String(data.url))
+        }
+      }
+    }))
+  }
+
+  function buildBackorderReport(selectProducts, timelines) {
+    const missing = selectProducts.map(product => {
+      const key = canonicalSku(product.sku)
+      if (!timelines.has(key)) return { ...product, reason: 'Not in specifications' }
+      if (!timelines.get(key)) return { ...product, reason: 'Backorder Timeline blank' }
+      return null
+    }).filter(Boolean)
+    missing.sort((a, b) => a.sku.localeCompare(b.sku, undefined, { numeric: true }))
+    return missing
+  }
+
   function csvEscape(value) {
     const s = String(value ?? '')
     return `"${s.replace(/"/g, '""')}"`
   }
 
-  function downloadCsv(rows) {
+  function downloadCsv(rows, columns, filename) {
     const out = [
-      ['SKU', 'Title', 'Brand', 'Department', 'Reason', 'Vendor rows', 'Blank vendor-price rows', 'Vendors'].map(csvEscape).join(','),
-      ...rows.map(row => [row.sku, row.title, row.brand, row.department, row.reason, row.vendorRows, row.blankRows, row.vendors].map(csvEscape).join(',')),
+      columns.map(([header]) => csvEscape(header)).join(','),
+      ...rows.map(row => columns.map(([, value]) => csvEscape(value(row))).join(',')),
     ].join('\n')
     const blob = new Blob([out], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'select-items-missing-vendor-price.csv'
+    a.download = filename
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -555,81 +719,141 @@
     return missing
   }
 
-  function reportPanel() {
+  const REPORTS = [
+    {
+      linkId: 'farla-select-vendor-price-link',
+      hash: 'select-missing-vendor-price',
+      linkText: ' SELECT Missing Vendor Price',
+      title: ' SELECT Items Missing Vendor Price',
+      csvName: 'select-items-missing-vendor-price.csv',
+      emptyText: 'All SELECT items are accounted for in Vendor Pricing with at least one non-blank Buying Price.',
+      async load(setStatus) {
+        const config = pusherConfig()
+        const selectProducts = await fetchSelectProducts(config, setStatus)
+        const vendorUrl = await waitForVendorExport(config, setStatus)
+        setStatus('Downloading Vendor Pricing and comparing SELECT identifiers…')
+        const index = vendorPriceIndex(await gmGetText(vendorUrl))
+        return { rows: buildReport(selectProducts, index), checked: selectProducts.length }
+      },
+      searchText: row => `${row.vendors}`,
+      headers: ['Reason', 'Vendor rows', 'Vendors'],
+      cells: row => [
+        el('td', { class: 'fsv-reason' },
+          el('span', { class: `label ${row.vendorRows ? 'label-warning' : 'label-danger'}` }, row.reason)
+        ),
+        el('td', null, row.vendorRows ? `${row.vendorRows} (${row.blankRows} blank)` : '0'),
+        el('td', null, row.vendors || '—'),
+      ],
+      csvColumns: [
+        ['Vendor rows', row => row.vendorRows],
+        ['Blank vendor-price rows', row => row.blankRows],
+        ['Vendors', row => row.vendors],
+      ],
+    },
+    {
+      linkId: 'farla-select-backorder-timeline-link',
+      hash: 'select-missing-backorder-timeline',
+      linkText: ' SELECT Missing Backorder Timeline',
+      title: ' SELECT Items Missing Backorder Timeline',
+      csvName: 'select-items-missing-backorder-timeline.csv',
+      emptyText: 'Every SELECT item has a Backorder Timeline.',
+      async load(setStatus) {
+        const selectProducts = await fetchSelectProducts(pusherConfig(), setStatus)
+        const timelines = await fetchBackorderTimelines(setStatus)
+        setStatus('Comparing SELECT items with Backorder Timelines…')
+        return { rows: buildBackorderReport(selectProducts, timelines), checked: selectProducts.length }
+      },
+      searchText: () => '',
+      headers: ['Brand', 'Department', 'Reason'],
+      cells: row => [
+        el('td', null, row.brand || '—'),
+        el('td', null, row.department || '—'),
+        el('td', { class: 'fsv-reason' },
+          el('span', { class: `label ${row.reason === 'Backorder Timeline blank' ? 'label-warning' : 'label-danger'}` }, row.reason)
+        ),
+      ],
+      csvColumns: [],
+    },
+  ]
+
+  function reportPanel(report) {
     const body = el('div', { class: 'panel-body' })
     const summary = el('span', { class: 'label label-info label-normal fsv-summary', style: 'display:none' })
     const panel = el(
       'div',
       { id: REPORT_ID, class: 'panel panel-reports' },
-      el('div', { class: 'panel-heading' }, el('h3', { class: 'panel-title' }, icon('fa-warning'), ' SELECT Items Missing Vendor Price', summary)),
+      el('div', { class: 'panel-heading' }, el('h3', { class: 'panel-title' }, icon('fa-warning'), report.title, summary)),
       body
     )
     return { panel, body, summary }
   }
 
-  async function loadReport(ui) {
+  function makeChecklistFilter(label, values, selected, iconClass, draw) {
+    const button = el('button', { class: 'btn btn-default btn-sm', type: 'button' }, icon(iconClass), ` ${label}`, el('span', { class: 'badge fsv-filter-count' }, String(values.length)))
+    const menu = el('div', { class: 'fsv-check-menu', style: 'display:none' })
+    const wrapper = el('div', { class: 'fsv-check-filter' }, button, menu)
+
+    const renderMenu = () => {
+      menu.replaceChildren(
+        el('div', { class: 'fsv-check-actions' },
+          el('button', { class: 'btn btn-default btn-xs', type: 'button', onclick: () => { values.forEach(v => selected.add(v)); renderMenu(); draw() } }, 'Tick all'),
+          el('button', { class: 'btn btn-default btn-xs', type: 'button', onclick: () => { selected.clear(); renderMenu(); draw() } }, 'Untick all')
+        ),
+        ...values.map(value => {
+          const input = el('input', { type: 'checkbox' })
+          input.checked = selected.has(value)
+          input.addEventListener('change', () => {
+            if (input.checked) selected.add(value)
+            else selected.delete(value)
+            draw()
+          })
+          return el('label', null, input, ` ${value}`)
+        })
+      )
+    }
+
+    button.addEventListener('click', event => {
+      event.stopPropagation()
+      const opening = menu.style.display === 'none'
+      if (opening) renderMenu()
+      menu.style.display = opening ? 'block' : 'none'
+    })
+    menu.addEventListener('click', event => event.stopPropagation())
+    document.addEventListener('click', () => { menu.style.display = 'none' })
+
+    return {
+      wrapper,
+      update: () => { button.querySelector('.fsv-filter-count').textContent = `${selected.size}/${values.length}` },
+    }
+  }
+
+  const sortValues = values => [...new Set(values)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+
+  async function loadReport(report, ui) {
     const setStatus = text => {
       ui.summary.style.display = 'none'
       ui.body.replaceChildren(el('div', { class: 'fsv-state' }, icon('fa-spinner fa-spin'), ` ${text}`))
     }
 
     try {
-      const config = pusherConfig()
-      const selectProducts = await fetchSelectProducts(config, setStatus)
-      const vendorUrl = await waitForVendorExport(config, setStatus)
-      setStatus('Downloading Vendor Pricing and comparing SELECT identifiers…')
-      const vendorCsv = await gmGetText(vendorUrl)
-      const index = vendorPriceIndex(vendorCsv)
-      const rows = buildReport(selectProducts, index)
+      const { rows, checked } = await report.load(setStatus)
 
-      ui.summary.textContent = `${rows.length} missing · ${selectProducts.length} SELECT items checked`
+      ui.summary.textContent = `${rows.length} missing · ${checked} SELECT items checked`
       ui.summary.style.display = ''
 
-      const search = el('input', { class: 'form-control input-sm', type: 'search', placeholder: 'Filter SKU / title / brand / department / vendor…' })
+      const search = el('input', { class: 'form-control input-sm', type: 'search', placeholder: 'Filter SKU / title / brand / department…' })
 
-      const brands = [...new Set(rows.map(row => row.brand || '—'))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      const departments = [...new Set(rows.map(row => row.department || '—'))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      const brands = sortValues(rows.map(row => row.brand || '—'))
+      const departments = sortValues(rows.map(row => row.department || '—'))
+      const reasons = sortValues(rows.map(row => row.reason))
       const selectedBrands = new Set(brands)
       const selectedDepartments = new Set(departments)
+      const selectedReasons = new Set(reasons)
 
-      function makeChecklistFilter(label, values, selected, iconClass) {
-        const button = el('button', { class: 'btn btn-default btn-sm', type: 'button' }, icon(iconClass), ` ${label}`, el('span', { class: 'badge fsv-filter-count' }, String(values.length)))
-        const menu = el('div', { class: 'fsv-check-menu', style: 'display:none' })
-        const wrapper = el('div', { class: 'fsv-check-filter' }, button, menu)
-
-        const renderMenu = () => {
-          menu.replaceChildren(
-            el('div', { class: 'fsv-check-actions' },
-              el('button', { class: 'btn btn-default btn-xs', type: 'button', onclick: () => { values.forEach(v => selected.add(v)); renderMenu(); draw() } }, 'Tick all'),
-              el('button', { class: 'btn btn-default btn-xs', type: 'button', onclick: () => { selected.clear(); renderMenu(); draw() } }, 'Untick all')
-            ),
-            ...values.map(value => {
-              const input = el('input', { type: 'checkbox' })
-              input.checked = selected.has(value)
-              input.addEventListener('change', () => {
-                if (input.checked) selected.add(value)
-                else selected.delete(value)
-                draw()
-              })
-              return el('label', null, input, ` ${value}`)
-            })
-          )
-        }
-
-        button.addEventListener('click', event => {
-          event.stopPropagation()
-          const opening = menu.style.display === 'none'
-          if (opening) renderMenu()
-          menu.style.display = opening ? 'block' : 'none'
-        })
-        menu.addEventListener('click', event => event.stopPropagation())
-        document.addEventListener('click', () => { menu.style.display = 'none' }, { once: false })
-
-        return { wrapper, button }
-      }
-
-      const brandFilter = makeChecklistFilter('Brand', brands, selectedBrands, 'fa-tags')
-      const departmentFilter = makeChecklistFilter('Department', departments, selectedDepartments, 'fa-sitemap')
+      const passes = row =>
+        selectedBrands.has(row.brand || '—') &&
+        selectedDepartments.has(row.department || '—') &&
+        selectedReasons.has(row.reason)
 
       const tbody = el('tbody')
       const table = el(
@@ -638,56 +862,56 @@
         el('thead', null, el('tr', null,
           el('th', null, 'SKU'),
           el('th', null, 'Title'),
-          el('th', null, 'Reason'),
-          el('th', null, 'Vendor rows'),
-          el('th', null, 'Vendors')
+          ...report.headers.map(h => el('th', null, h))
         )),
         tbody
       )
 
+      const filters = []
       const draw = () => {
         const q = search.value.trim().toLowerCase()
-        const shown = rows.filter(row => {
-          const brand = row.brand || '—'
-          const department = row.department || '—'
-          if (!selectedBrands.has(brand)) return false
-          if (!selectedDepartments.has(department)) return false
-          return !q || `${row.sku} ${row.title} ${row.brand} ${row.department} ${row.reason} ${row.vendors}`.toLowerCase().includes(q)
-        })
-        brandFilter.button.querySelector('.fsv-filter-count').textContent = `${selectedBrands.size}/${brands.length}`
-        departmentFilter.button.querySelector('.fsv-filter-count').textContent = `${selectedDepartments.size}/${departments.length}`
+        const shown = rows.filter(row => passes(row) &&
+          (!q || `${row.sku} ${row.title} ${row.brand} ${row.department} ${row.reason} ${report.searchText(row)}`.toLowerCase().includes(q)))
+        for (const filter of filters) filter.update()
         tbody.replaceChildren(...shown.map(row => el('tr', null,
           el('td', { class: 'fsv-sku' }, row.href
             ? el('a', { href: row.href, target: '_blank' }, row.sku)
             : row.sku),
           el('td', null, row.title),
-          el('td', { class: 'fsv-reason' },
-            el('span', { class: `label ${row.vendorRows ? 'label-warning' : 'label-danger'}` }, row.reason)
-          ),
-          el('td', null, row.vendorRows ? `${row.vendorRows} (${row.blankRows} blank)` : '0'),
-          el('td', null, row.vendors || '—')
+          ...report.cells(row)
         )))
       }
+      filters.push(
+        makeChecklistFilter('Brand', brands, selectedBrands, 'fa-tags', draw),
+        makeChecklistFilter('Department', departments, selectedDepartments, 'fa-sitemap', draw),
+        makeChecklistFilter('Reason', reasons, selectedReasons, 'fa-filter', draw)
+      )
       search.addEventListener('input', draw)
       draw()
+
+      const csvColumns = [
+        ['SKU', row => row.sku],
+        ['Title', row => row.title],
+        ['Brand', row => row.brand],
+        ['Department', row => row.department],
+        ['Reason', row => row.reason],
+        ...report.csvColumns,
+      ]
 
       ui.body.replaceChildren(
         el('div', { class: 'fsv-toolbar' },
           search,
-          brandFilter.wrapper,
-          departmentFilter.wrapper,
-          el('button', { class: 'btn btn-default btn-sm', type: 'button', onclick: () => downloadCsv(rows.filter(row => selectedBrands.has(row.brand || '—') && selectedDepartments.has(row.department || '—'))) }, icon('fa-download'), ' CSV'),
-          el('button', { class: 'btn btn-success btn-sm', type: 'button', onclick: () => void loadReport(ui) }, icon('fa-refresh'), ' Refresh')
+          ...filters.map(f => f.wrapper),
+          el('button', { class: 'btn btn-default btn-sm', type: 'button', onclick: () => downloadCsv(rows.filter(passes), csvColumns, report.csvName) }, icon('fa-download'), ' CSV'),
+          el('button', { class: 'btn btn-success btn-sm', type: 'button', onclick: () => void loadReport(report, ui) }, icon('fa-refresh'), ' Refresh')
         ),
-        rows.length
-          ? table
-          : el('div', { class: 'alert alert-success' }, 'All SELECT items are accounted for in Vendor Pricing with at least one non-blank Buying Price.')
+        rows.length ? table : el('div', { class: 'alert alert-success' }, report.emptyText)
       )
     } catch (error) {
-      console.error('[SELECT Vendor Price Report]', error)
+      console.error('[SELECT Reports]', error)
       ui.body.replaceChildren(
         el('div', { class: 'alert alert-danger' }, error.message || String(error)),
-        el('button', { class: 'btn btn-info btn-sm', type: 'button', onclick: () => void loadReport(ui) }, icon('fa-refresh'), ' Try again')
+        el('button', { class: 'btn btn-info btn-sm', type: 'button', onclick: () => void loadReport(report, ui) }, icon('fa-refresh'), ' Try again')
       )
     }
   }
@@ -696,27 +920,23 @@
     if (!location.pathname.includes('/reports/inventory')) return
     const list = document.querySelector('#report_selector_placeholder .side-list-select')
     const placeholder = document.getElementById('report_placeholder')
-    if (!list || !placeholder || document.getElementById('farla-select-vendor-price-link')) return
+    if (!list || !placeholder) return
 
-    const link = el(
-      'a',
-      { href: '#', id: 'farla-select-vendor-price-link', class: 'list-group-item' },
-      icon('fa-warning'),
-      ' SELECT Missing Vendor Price'
-    )
-
-    link.addEventListener('click', event => {
-      event.preventDefault()
-      for (const sibling of list.querySelectorAll('.list-group-item')) sibling.classList.remove('selected')
-      link.classList.add('selected')
-      const ui = reportPanel()
-      placeholder.replaceChildren(ui.panel)
-      history.replaceState(null, '', `${location.pathname}${location.search}#select-missing-vendor-price`)
-      void loadReport(ui)
-    })
-
-    list.append(link)
-    log('report added')
+    for (const report of REPORTS) {
+      if (document.getElementById(report.linkId)) continue
+      const link = el('a', { href: '#', id: report.linkId, class: 'list-group-item' }, icon('fa-warning'), report.linkText)
+      link.addEventListener('click', event => {
+        event.preventDefault()
+        for (const sibling of list.querySelectorAll('.list-group-item')) sibling.classList.remove('selected')
+        link.classList.add('selected')
+        const ui = reportPanel(report)
+        placeholder.replaceChildren(ui.panel)
+        history.replaceState(null, '', `${location.pathname}${location.search}#${report.hash}`)
+        void loadReport(report, ui)
+      })
+      list.append(link)
+      log('report added', report.hash)
+    }
   }
 
   install()
@@ -726,7 +946,7 @@
     queued = true
     setTimeout(() => {
       queued = false
-      try { install() } catch (error) { console.error('[SELECT Vendor Price Report]', error) }
+      try { install() } catch (error) { console.error('[SELECT Reports]', error) }
     }, 50)
   }).observe(document.body, { childList: true, subtree: true })
 })()
